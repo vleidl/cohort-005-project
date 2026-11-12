@@ -31,12 +31,6 @@ export enum QuestionType {
   TrueFalse = "true_false",
 }
 
-export enum RefundStatus {
-  Requested = "requested",
-  Approved = "approved",
-  Declined = "declined",
-}
-
 export enum TeamMemberRole {
   Admin = "admin",
   Member = "member",
@@ -229,6 +223,8 @@ export const purchases = sqliteTable(
   (table) => [index("purchases_course_idx").on(table.courseId)]
 );
 
+// A Refund Request is only possible when the Purchase is eligible, and it is
+// always granted — so every row here is a Refund that has happened.
 export const refunds = sqliteTable(
   "refunds",
   {
@@ -236,19 +232,12 @@ export const refunds = sqliteTable(
     purchaseId: integer("purchase_id")
       .notNull()
       .references(() => purchases.id),
-    status: text("status")
-      .notNull()
-      .$type<RefundStatus>()
-      .default(RefundStatus.Requested),
-    // The learner's own words, in the box on the course page.
+    // The student's own words, kept for later analysis.
     reason: text("reason").notNull(),
-    // Null until someone approves — a declined request refunds nothing.
-    amountRefunded: integer("amount_refunded"),
-    requestedAt: text("requested_at")
+    amountRefunded: integer("amount_refunded").notNull(),
+    refundedAt: text("refunded_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
-    resolvedAt: text("resolved_at"),
-    resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
   },
   (table) => [index("refunds_purchase_idx").on(table.purchaseId)]
 );
@@ -288,6 +277,8 @@ export const coupons = sqliteTable("coupons", {
     .references(() => purchases.id),
   redeemedByUserId: integer("redeemed_by_user_id").references(() => users.id),
   redeemedAt: text("redeemed_at"),
+  // Set when this unclaimed Seat was refunded; it can no longer be redeemed.
+  refundId: integer("refund_id").references(() => refunds.id),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),

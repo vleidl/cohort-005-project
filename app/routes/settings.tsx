@@ -12,7 +12,6 @@ import { Label } from "~/components/ui/label";
 import { Textarea } from "~/components/ui/textarea";
 import {
   UserRole,
-  RefundStatus,
   users,
   courses,
   purchases,
@@ -21,7 +20,7 @@ import {
 import { AlertTriangle } from "lucide-react";
 import { data, isRouteErrorResponse, Link } from "react-router";
 import { db } from "~/db";
-import { and, eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { formatPrice } from "~/lib/utils";
 
 const settingsSchema = z.object({
@@ -55,24 +54,20 @@ export async function loader({ request }: Route.LoaderArgs) {
     throw data("User not found.", { status: 404 });
   }
 
-  const pendingChargebacks = db
+  const pastRefunds = db
     .select({
       id: refunds.id,
       courseTitle: courses.title,
       courseSlug: courses.slug,
-      amountPaid: purchases.amountPaid,
+      amountRefunded: refunds.amountRefunded,
       reason: refunds.reason,
-      requestedAt: refunds.requestedAt,
+      refundedAt: refunds.refundedAt,
     })
     .from(refunds)
     .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
     .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(
-      and(
-        eq(purchases.userId, currentUserId),
-        eq(refunds.status, RefundStatus.Requested)
-      )
-    )
+    .where(eq(purchases.userId, currentUserId))
+    .orderBy(desc(refunds.refundedAt))
     .all();
 
   return {
@@ -83,7 +78,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       bio: currentUser.bio,
       role: currentUser.role,
     },
-    pendingChargebacks,
+    pastRefunds,
   };
 }
 
@@ -122,7 +117,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, pendingChargebacks } = loaderData;
+  const { user, pastRefunds } = loaderData;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -209,35 +204,28 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </CardContent>
       </Card>
 
-      {pendingChargebacks.length > 0 && (
+      {pastRefunds.length > 0 && (
         <Card className="mt-8 max-w-md">
           <CardHeader>
-            <h2 className="text-lg font-semibold">Pending Chargeback</h2>
+            <h2 className="text-lg font-semibold">Refunds</h2>
             <p className="text-sm text-muted-foreground">
-              {pendingChargebacks.length === 1
-                ? "One chargeback is waiting on us."
-                : `${pendingChargebacks.length} chargebacks are waiting on us.`}
+              Money we have sent back to the card you paid with.
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
-            {pendingChargebacks.map((chargeback) => (
-              <div key={chargeback.id} className="rounded-md border p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <Link
-                    to={`/courses/${chargeback.courseSlug}`}
-                    className="font-medium hover:underline"
-                  >
-                    {chargeback.courseTitle}
-                  </Link>
-                  <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
-                    Pending Chargeback
-                  </span>
-                </div>
+            {pastRefunds.map((refund) => (
+              <div key={refund.id} className="rounded-md border p-3">
+                <Link
+                  to={`/courses/${refund.courseSlug}`}
+                  className="font-medium hover:underline"
+                >
+                  {refund.courseTitle}
+                </Link>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {formatPrice(chargeback.amountPaid)} · raised{" "}
-                  {new Date(chargeback.requestedAt).toLocaleDateString()}
+                  {formatPrice(refund.amountRefunded)} refunded on{" "}
+                  {new Date(refund.refundedAt).toLocaleDateString()}
                 </p>
-                <p className="mt-2 text-sm">{chargeback.reason}</p>
+                <p className="mt-2 text-sm">{refund.reason}</p>
               </div>
             ))}
           </CardContent>

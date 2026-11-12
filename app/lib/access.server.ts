@@ -6,11 +6,11 @@ import {
   users,
   courses,
   enrollments,
-  purchases,
 } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
 import { checkPppAccess } from "~/lib/ppp";
+import { getLatestOwnPurchase } from "~/lib/refunds.server";
 
 function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
@@ -32,14 +32,6 @@ function findEnrollment(userId: number, courseId: number) {
 
 function isUserEnrolled(userId: number, courseId: number) {
   return !!findEnrollment(userId, courseId);
-}
-
-function findPurchase(userId: number, courseId: number) {
-  return db
-    .select()
-    .from(purchases)
-    .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
-    .get();
 }
 
 // ─── Access Resolution ───
@@ -107,7 +99,7 @@ export async function getAccess(
   };
 
   if (enrolled && !isStaff && course) {
-    const purchase = findPurchase(userId, courseId);
+    const purchase = getLatestOwnPurchase(userId, courseId);
     const currentCountry = await resolveCountry(request);
     ppp = checkPppAccess(
       course.price,
