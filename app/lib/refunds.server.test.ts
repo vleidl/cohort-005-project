@@ -12,19 +12,23 @@ import {
 } from "~/test/setup";
 import {
   approveRefundRequest,
+  canRefundRepurchase,
   checkRefundEligibility,
   declineRefundRequest,
+  getRefundOffer,
   describeLearnerRefundOutcome,
   listOpenRefundRequests,
-  listOutstandingRefunds,
   listPurchasesForDiscretionaryRefund,
   listRefundRequestsForLearner,
-  markRefundFailed,
-  markRefundIssued,
   raiseDiscretionaryRefundRequest,
   raiseRefundRequest,
   type RefundIneligibility,
 } from "./refunds.server";
+import {
+  listOutstandingRefunds,
+  markRefundFailed,
+  markRefundIssued,
+} from "./refund-money.server";
 import { getAccess, requireAdmin } from "./access.server";
 import { redeemCoupon } from "./coupons.server";
 
@@ -113,8 +117,9 @@ function teamPurchaseWithCoupon(buyerId: number) {
 
 /**
  * The course page offers a refund exactly when the refund action would
- * accept one — both ask checkRefundEligibility. Asserting both here keeps
- * them from drifting apart again.
+ * accept one. Asserting the eligibility check, the page's offer and the
+ * action together keeps them from drifting apart. `purchase` is the
+ * learner's latest purchase of the course, the one the page offers on.
  */
 function expectBlockedBy(
   learner: { id: number },
@@ -123,6 +128,10 @@ function expectBlockedBy(
 ) {
   expect(checkRefundEligibility(db, learner, purchase)).toEqual({
     eligible: false,
+    rule,
+  });
+  expect(getRefundOffer(db, learner, purchase.courseId)).toEqual({
+    available: false,
     rule,
   });
   expect(raiseRefundRequest(db, learner, purchase, "Please refund.")).toEqual({
@@ -170,7 +179,9 @@ describe("raising a Refund Request", () => {
     expect(outcome.email.to).toBe(base.user.email);
     expect(outcome.email.subject).toBe("Refund requested — Test Course");
     expect(outcome.email.body).toContain("$79");
-    expect(outcome.email.body).toContain("we will email you again when it is done");
+    expect(outcome.email.body).toContain(
+      "we will email you again when it is done"
+    );
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("subject=Refund requested — Test Course")
     );
@@ -322,7 +333,90 @@ describe("Refund Eligibility", () => {
     const purchase = buyCourse(db, base.user.id, base.course.id);
     const someoneElse = addUser(db, "Someone Else");
 
-    expectBlockedBy(someoneElse, purchase, "not_purchaser");
+    expect(checkRefundEligibility(db, someoneElse, purchase)).toEqual({
+      eligible: false,
+      rule: "not_purchaser",
+    });
+    expect(
+      raiseRefundRequest(db, someoneElse, purchase, "Please refund.")
+    ).toEqual({ ok: false, rule: "not_purchaser" });
+    // The page only ever offers on the learner's own purchases.
+    expect(getRefundOffer(db, someoneElse, base.course.id)).toBeNull();
+  });
+});
+
+describe("the course page's refund offer", () => {
+  it("offers the amount paid and the last day to ask", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id, {
+      amountPaid: 7900,
+    });
+
+    expect(getRefundOffer(db, base.user, base.course.id)).toEqual({
+      available: true,
+      amount: 7900,
+      lastDayInWindow: expect.any(String),
+    });
+    expect(
+      raiseRefundRequest(db, base.user, purchase, "Please refund.").ok
+    ).toBe(true);
+  });
+
+  it("offers nothing to a learner who hasn't bought the course", () => {
+    expect(getRefundOffer(db, base.user, base.course.id)).toBeNull();
+  });
+
+  // Their access ended with the Refund; the page sells to them again instead.
+  it("offers nothing once the learner's Refund has ended their Enrollment", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    approveRefundRequest(db, admin, raise(base.user, purchase));
+
+    expect(getRefundOffer(db, base.user, base.course.id)).toBeNull();
+  });
+
+  // The team buyer isn't enrolled — the seats are for their team — but can
+  // still hand back a team Purchase nobody has claimed a seat from.
+  it("offers a team buyer who isn't enrolled a refund on their team Purchase", () => {
+    const purchase = db
+      .insert(schema.purchases)
+      .values({
+        userId: base.user.id,
+        courseId: base.course.id,
+        amountPaid: 9800,
+      })
+      .returning()
+      .get();
+    db.insert(schema.coupons)
+      .values({
+        teamId: db.insert(schema.teams).values({}).returning().get().id,
+        courseId: base.course.id,
+        code: "TEAM-SEAT",
+        purchaseId: purchase.id,
+      })
+      .run();
+
+    expect(getRefundOffer(db, base.user, base.course.id)).toMatchObject({
+      available: true,
+      amount: 9800,
+    });
+  });
+});
+
+describe("buying a course again after a Refund", () => {
+  // Story 16: the learner is told before they pay, not after.
+  it("warns that a repurchase can't be refunded the normal way", () => {
+    expect(canRefundRepurchase(db, base.user, base.course.id)).toBe(true);
+
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    approveRefundRequest(db, admin, raise(base.user, purchase));
+
+    expect(canRefundRepurchase(db, base.user, base.course.id)).toBe(false);
+  });
+
+  it("doesn't warn after a declined request", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    declineRefundRequest(db, admin, raise(base.user, purchase), "No.");
+
+    expect(canRefundRepurchase(db, base.user, base.course.id)).toBe(true);
   });
 });
 
@@ -359,6 +453,26 @@ describe("approving a Refund Request", () => {
     );
     expect(access.enrolled).toBe(false);
     expect(access.canViewContent).toBe(false);
+  });
+
+  // Access follows the purchases: refunding an older purchase doesn't take
+  // away what a later, unrefunded purchase of the course paid for.
+  it("keeps access while another purchase of the course is unrefunded", async () => {
+    const older = buyCourse(db, base.user.id, base.course.id, {
+      purchasedAt: daysAgo(3),
+    });
+    buyCourse(db, base.user.id, base.course.id);
+
+    expect(approveRefundRequest(db, admin, raise(base.user, older)).ok).toBe(
+      true
+    );
+
+    const access = await getAccess(
+      db,
+      await requestAs(base.user.id),
+      base.course.id
+    );
+    expect(access.enrolled).toBe(true);
   });
 
   // ADR 0002: progress is hidden, not deleted, so it comes back on a
@@ -421,9 +535,9 @@ describe("approving a Refund Request", () => {
       const request = raise(base.user, purchase);
       const threeWeeksLater = new Date(Date.now() + 21 * 24 * 60 * 60 * 1000);
 
-      expect(
-        approveRefundRequest(db, admin, request, threeWeeksLater).ok
-      ).toBe(true);
+      expect(approveRefundRequest(db, admin, request, threeWeeksLater).ok).toBe(
+        true
+      );
     });
 
     it("can still be approved after the learner kept watching", () => {
@@ -509,6 +623,44 @@ describe("decision guards", () => {
     });
   });
 
+  // Only Admins decide or move money, whoever calls the module.
+  it("refuses anyone who isn't an Admin", () => {
+    const instructor = base.instructor;
+    const learner = addUser(db, "Learner");
+    const purchase = buyCourse(db, learner.id, base.course.id);
+    const request = raise(learner, purchase);
+
+    expect(approveRefundRequest(db, instructor, request)).toEqual({
+      ok: false,
+      refusal: "not_admin",
+    });
+    expect(declineRefundRequest(db, instructor, request, "No.")).toEqual({
+      ok: false,
+      refusal: "not_admin",
+    });
+
+    approveRefundRequest(db, admin, request);
+    expect(markRefundIssued(db, instructor, request)).toEqual({
+      ok: false,
+      refusal: "not_admin",
+    });
+    expect(markRefundFailed(db, instructor, request)).toEqual({
+      ok: false,
+      refusal: "not_admin",
+    });
+    expect(listOutstandingRefunds(db)).toEqual([
+      expect.objectContaining({
+        id: request.id,
+        refundState: schema.RefundMoneyState.Pending,
+      }),
+    ]);
+
+    const other = buyCourse(db, base.user.id, base.course.id);
+    expect(
+      raiseDiscretionaryRefundRequest(db, instructor, base.user, other, "Hm.")
+    ).toEqual({ ok: false, rule: "not_admin" });
+  });
+
   // No conflict of interest: an Admin who bought a course can ask for a
   // refund like anyone else, but another Admin has to decide it.
   it("refuses an Admin deciding their own Refund Request", () => {
@@ -584,7 +736,11 @@ describe("the refund queue", () => {
       reason: "Too basic for me.",
       learner: { id: base.user.id, name: "Test User", email: base.user.email },
       course: { id: base.course.id, title: "Test Course" },
-      purchase: { id: purchase.id, amountPaid: 7900, purchasedAt: purchase.createdAt },
+      purchase: {
+        id: purchase.id,
+        amountPaid: 7900,
+        purchasedAt: purchase.createdAt,
+      },
       secondsWatched: 900,
       lessonsCompleted: 3,
       lessonCount: 10,
@@ -649,13 +805,28 @@ describe("Discretionary Refund Requests", () => {
     const { purchase, coupon } = teamPurchaseWithCoupon(base.user.id);
     const member = addUser(db, "Team Member");
     db.update(schema.coupons)
-      .set({ redeemedByUserId: member.id, redeemedAt: new Date().toISOString() })
+      .set({
+        redeemedByUserId: member.id,
+        redeemedAt: new Date().toISOString(),
+      })
       .where(eq(schema.coupons.id, coupon.id))
       .run();
 
     expect(
       raiseDiscretionaryRefundRequest(db, admin, base.user, purchase, "Please.")
     ).toEqual({ ok: false, rule: "claimed_team_seat" });
+  });
+
+  // Discretion overrides one Refund per course, never one Refund per
+  // purchase: the same money can't be sent back twice.
+  it("never refunds a purchase that already has an Approved Refund Request", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    approveRefundRequest(db, admin, raise(base.user, purchase));
+
+    expect(
+      raiseDiscretionaryRefundRequest(db, admin, base.user, purchase, "Again.")
+    ).toEqual({ ok: false, rule: "purchase_already_refunded" });
+    expect(listOpenRefundRequests(db)).toEqual([]);
   });
 
   it("never overrides an existing Open Refund Request", () => {
@@ -737,7 +908,11 @@ describe("Discretionary Refund Requests", () => {
         id: older.id,
         amountPaid: 4900,
         purchasedAt: older.createdAt,
-        learner: { id: base.user.id, name: "Test User", email: base.user.email },
+        learner: {
+          id: base.user.id,
+          name: "Test User",
+          email: base.user.email,
+        },
         course: { id: base.course.id, title: "Test Course" },
       },
     ]);
@@ -873,7 +1048,7 @@ describe("moving the money for a Refund", () => {
 
     expect(markRefundFailed(db, admin, request)).toMatchObject({
       ok: true,
-      refund: { refundState: schema.RefundMoneyState.Failed },
+      refund: { state: schema.RefundMoneyState.Failed },
     });
     expect(listOutstandingRefunds(db)).toEqual([
       expect.objectContaining({
@@ -884,7 +1059,7 @@ describe("moving the money for a Refund", () => {
 
     expect(markRefundIssued(db, admin, request)).toMatchObject({
       ok: true,
-      refund: { refundState: schema.RefundMoneyState.Issued },
+      refund: { state: schema.RefundMoneyState.Issued },
     });
     expect(listOutstandingRefunds(db)).toEqual([]);
   });
@@ -901,11 +1076,13 @@ describe("moving the money for a Refund", () => {
   it("leaves the Refund Request Approved when the Refund fails", () => {
     const request = approvedRefund();
 
-    expect(markRefundFailed(db, admin, request)).toMatchObject({
-      ok: true,
-      refund: { status: schema.RefundStatus.Approved },
-    });
+    expect(markRefundFailed(db, admin, request).ok).toBe(true);
     expect(listOpenRefundRequests(db)).toEqual([]);
+    const [mine] = listRefundRequestsForLearner(db, base.user);
+    expect(mine).toMatchObject({
+      id: request.id,
+      outcome: { status: "refund_pending" },
+    });
   });
 
   it("records when the Refund's state last changed", () => {

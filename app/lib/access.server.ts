@@ -208,8 +208,7 @@ export async function requireInstructorOrAdmin(db: Db, request: Request) {
 
 /**
  * Throws 401 when signed out, 403 unless the user is an Admin. Returns the
- * Admin. The same rule the other admin pages apply inline; call it from both
- * the loader and the action.
+ * Admin. Every admin page calls it from both its loader and its action.
  */
 export async function requireAdmin(db: Db, request: Request) {
   const userId = await requireUserId(request);

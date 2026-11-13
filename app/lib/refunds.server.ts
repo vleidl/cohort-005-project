@@ -7,6 +7,7 @@ import {
   isNotNull,
   isNull,
   ne,
+  notExists,
   sql,
 } from "drizzle-orm";
 import type { Db } from "~/db";
@@ -26,12 +27,23 @@ import {
   RefundStatus,
   UserRole,
 } from "~/db/schema";
-import { formatPrice } from "~/lib/utils";
+import {
+  buildDiscretionaryRefundRequestedEmail,
+  buildRefundApprovedEmail,
+  buildRefundDeclinedEmail,
+  buildRefundRequestedEmail,
+  sendEmail,
+  type RefundEmail,
+} from "~/lib/refund-emails.server";
 
 // ─── Refunds ───
-// Every refund operation lives here. Routes load the session, call in, and
-// turn the outcome into a response — so the course page's refund offer and
-// the refund action can never disagree.
+// Refund Requests: raising, deciding and listing them. Routes load the
+// session, call in, and turn the outcome into a response — so the course
+// page's refund offer and the refund action can never disagree.
+//
+// Close by: the Refund's money states (`~/lib/refund-money.server`), the
+// emails to the learner (`~/lib/refund-emails.server`), and what each
+// refusal tells the person (`~/lib/refund-refusals.server`).
 //
 // Every operation takes the database as its first argument (the test seam),
 // then positional parameters (project convention). Expected refusals come
@@ -64,28 +76,12 @@ export type RefundEligibility =
   | { eligible: true; amount: number; lastDayInWindow: string }
   | { eligible: false; rule: RefundIneligibility };
 
-/** What the learner is told when a rule stops them. */
-export function describeRefundIneligibility(rule: RefundIneligibility) {
-  switch (rule) {
-    case "not_purchaser":
-      return "Only the person who bought this course can ask for a refund.";
-    case "request_already_open":
-      return "You already have an open refund request on this purchase. We will email you when it is decided.";
-    case "already_refunded":
-      return "You have already had a refund for this course, so this purchase can't be refunded.";
-    case "claimed_team_seat":
-      return "A team seat from this purchase has been claimed, so it can't be refunded.";
-    case "window_closed":
-      return `The ${REFUND_WINDOW_DAYS}-day refund window has closed.`;
-    case "watched_too_much":
-      return "You have watched more than 2 hours of this course, so it can't be refunded.";
-    case "completed_too_much":
-      return "You have completed half or more of this course's lessons, so it can't be refunded.";
-  }
-}
-
 /** The learner's most recent purchase of a course, if any. */
-export function findLatestPurchase(db: Db, learnerId: number, courseId: number) {
+export function findLatestPurchase(
+  db: Db,
+  learnerId: number,
+  courseId: number
+) {
   return db
     .select()
     .from(purchases)
@@ -155,6 +151,62 @@ export function checkRefundEligibility(
   return { eligible: true, amount: purchase.amountPaid, lastDayInWindow };
 }
 
+export type RefundOffer =
+  | { available: true; amount: number; lastDayInWindow: string }
+  | { available: false; rule: RefundIneligibility };
+
+/**
+ * What the course page offers the learner on their latest purchase: a
+ * refund, the rule that stops one, or nothing (null) when they have no
+ * purchase to refund. Asks the same Refund Eligibility check as
+ * `raiseRefundRequest`, so the page never offers a refund the action would
+ * refuse.
+ */
+export function getRefundOffer(
+  db: Db,
+  learner: Learner,
+  courseId: number,
+  now: Date = new Date()
+): RefundOffer | null {
+  const purchase = findLatestPurchase(db, learner.id, courseId);
+  if (!purchase) return null;
+
+  // A team buyer isn't enrolled — the seats are for their team — but can
+  // still refund a team Purchase nobody has claimed a seat from. Anyone
+  // else who isn't enrolled has nothing left to refund.
+  if (
+    !isEnrolled(db, learner.id, courseId) &&
+    !isTeamPurchase(db, purchase.id)
+  ) {
+    return null;
+  }
+
+  const eligibility = checkRefundEligibility(db, learner, purchase, now);
+  if (!eligibility.eligible) {
+    return { available: false, rule: eligibility.rule };
+  }
+
+  return {
+    available: true,
+    amount: eligibility.amount,
+    lastDayInWindow: eligibility.lastDayInWindow,
+  };
+}
+
+/**
+ * Whether buying the course again could be refunded the normal way. False
+ * once the learner has had a Refund for the course: at most one Refund per
+ * course, so a repurchase can only be refunded through a Discretionary
+ * Refund Request. The course page warns them before they buy.
+ */
+export function canRefundRepurchase(
+  db: Db,
+  learner: Learner,
+  courseId: number
+) {
+  return !hasApprovedRefundForCourse(db, learner.id, courseId);
+}
+
 export type RaiseRefundRequestOutcome =
   | {
       ok: true;
@@ -210,7 +262,7 @@ export function raiseRefundRequest(
 // there are no reverse operations. Approval never rechecks Refund
 // Eligibility (ADR 0001) — the request is judged as it was raised.
 
-type Admin = { id: number };
+export type Admin = { id: number };
 type RefundRequestRef = { id: number };
 type RefundRequestRow = typeof refunds.$inferSelect;
 
@@ -245,7 +297,11 @@ export function approveRefundRequest(
 
     applyApproval(tx, guarded.purchase, now);
 
-    return { ok: true as const, refundRequest: decided, purchase: guarded.purchase };
+    return {
+      ok: true as const,
+      refundRequest: decided,
+      purchase: guarded.purchase,
+    };
   });
 
   if (!outcome.ok) return outcome;
@@ -283,7 +339,11 @@ export function declineRefundRequest(
     });
     if (!decided) return refuse("already_decided");
 
-    return { ok: true as const, refundRequest: decided, purchase: guarded.purchase };
+    return {
+      ok: true as const,
+      refundRequest: decided,
+      purchase: guarded.purchase,
+    };
   });
 
   if (!outcome.ok) return outcome;
@@ -295,30 +355,13 @@ export function declineRefundRequest(
 
 /** Why an Admin's decision was refused. */
 export type DecisionRefusal =
+  | "not_admin"
   | "not_found"
   | "already_decided"
   | "own_request"
   | "decline_reason_missing"
   | "own_discretionary_request"
   | "sole_admin_discretionary_request";
-
-/** What the Admin is told when a decision is refused. */
-export function describeDecisionRefusal(refusal: DecisionRefusal) {
-  switch (refusal) {
-    case "not_found":
-      return "That refund request doesn't exist.";
-    case "already_decided":
-      return "This request was already decided.";
-    case "own_request":
-      return "You can't decide a refund request on your own purchase.";
-    case "decline_reason_missing":
-      return "Give the learner a reason for declining.";
-    case "own_discretionary_request":
-      return "You raised this Discretionary Refund Request, so a different Admin has to decide it.";
-    case "sole_admin_discretionary_request":
-      return "You raised this Discretionary Refund Request and you are the only Admin. It can't be decided until a second Admin exists.";
-  }
-}
 
 function refuse(refusal: DecisionRefusal) {
   return { ok: false as const, refusal };
@@ -335,6 +378,8 @@ function guardDecision(
 ):
   | { ok: true; request: RefundRequestRow; purchase: Purchase }
   | { ok: false; refusal: DecisionRefusal } {
+  if (!isAdmin(db, admin)) return refuse("not_admin");
+
   const row = db
     .select({ request: refunds, purchase: purchases })
     .from(refunds)
@@ -343,7 +388,8 @@ function guardDecision(
     .get();
 
   if (!row) return refuse("not_found");
-  if (row.request.status !== RefundStatus.Open) return refuse("already_decided");
+  if (row.request.status !== RefundStatus.Open)
+    return refuse("already_decided");
 
   // No conflict of interest: an Admin can't decide on their own money.
   if (row.purchase.userId === admin.id) return refuse("own_request");
@@ -418,8 +464,17 @@ function voidUnclaimedCoupons(tx: Db, purchase: Purchase, now: Date) {
  * progress, quiz attempts and watch history stay, hidden because they're
  * shown only to enrolled learners, and come back when a repurchase creates a
  * new Enrollment (ADR 0002). Don't delete them here.
+ *
+ * The Enrollment stays while the learner holds another purchase of the
+ * course with no Approved Refund Request — the same rule ratings use to
+ * decide a learner is refunded (`~/lib/ratings.server`). Runs after the
+ * approval is recorded, so this purchase already counts as refunded.
  */
 function endEnrollment(tx: Db, purchase: Purchase) {
+  if (hasUnrefundedPurchaseOfCourse(tx, purchase.userId, purchase.courseId)) {
+    return;
+  }
+
   tx.delete(enrollments)
     .where(
       and(
@@ -545,25 +600,20 @@ function getEarlierRequests(
 // and a different Admin must decide it (see `guardDecision`), so one person
 // can't send money out against the rules alone (ADR 0001).
 
-/** The rules even a Discretionary Refund Request never overrides. */
-export type DiscretionaryRefundIneligibility = Extract<
-  RefundIneligibility,
-  "not_purchaser" | "request_already_open" | "claimed_team_seat"
->;
+/**
+ * The rules even a Discretionary Refund Request never overrides. It sets
+ * aside one Refund per course, but never one Refund per purchase.
+ */
+export type DiscretionaryRefundIneligibility =
+  | Extract<
+      RefundIneligibility,
+      "not_purchaser" | "request_already_open" | "claimed_team_seat"
+    >
+  | "purchase_already_refunded";
 
-/** What the Admin is told when a rule stops a Discretionary Refund Request. */
-export function describeDiscretionaryRefundIneligibility(
-  rule: DiscretionaryRefundIneligibility
-) {
-  switch (rule) {
-    case "not_purchaser":
-      return "That learner didn't make this purchase.";
-    case "request_already_open":
-      return "This purchase already has an Open Refund Request. Decide that one instead.";
-    case "claimed_team_seat":
-      return "A team seat from this purchase has been claimed, so it can't be refunded.";
-  }
-}
+/** Why a Discretionary Refund Request couldn't be raised. */
+export type DiscretionaryRefusal =
+  DiscretionaryRefundIneligibility | "not_admin";
 
 export type RaiseDiscretionaryRefundRequestOutcome =
   | {
@@ -571,7 +621,7 @@ export type RaiseDiscretionaryRefundRequestOutcome =
       refundRequest: typeof refunds.$inferSelect;
       email: RefundEmail;
     }
-  | { ok: false; rule: DiscretionaryRefundIneligibility };
+  | { ok: false; rule: DiscretionaryRefusal };
 
 /**
  * An Admin raises a Discretionary Refund Request for a learner's purchase.
@@ -587,6 +637,10 @@ export function raiseDiscretionaryRefundRequest(
   now: Date = new Date()
 ): RaiseDiscretionaryRefundRequestOutcome {
   const outcome = db.transaction((tx) => {
+    if (!isAdmin(tx, admin)) {
+      return { ok: false as const, rule: "not_admin" as const };
+    }
+
     const rule = checkDiscretionaryRules(tx, learner, purchase);
     if (rule) return { ok: false as const, rule };
 
@@ -641,6 +695,18 @@ export function listPurchasesForDiscretionaryRefund(
     .all();
 }
 
+/**
+ * Callers pass an Admin, but the module checks the role itself: no route
+ * can decide a Refund Request or move money for someone who isn't one.
+ */
+export function isAdmin(db: Db, admin: Admin) {
+  return !!db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.id, admin.id), eq(users.role, UserRole.Admin)))
+    .get();
+}
+
 /** Whether some Admin other than this one could decide a request. */
 function hasOtherAdmin(db: Db, adminId: number) {
   return !!db
@@ -657,6 +723,8 @@ function checkDiscretionaryRules(
 ): DiscretionaryRefundIneligibility | null {
   if (purchase.userId !== learner.id) return "not_purchaser";
   if (hasOpenRefundRequest(db, purchase.id)) return "request_already_open";
+  if (hasApprovedRefundRequest(db, purchase.id))
+    return "purchase_already_refunded";
   if (hasClaimedSeat(db, purchase.id)) return "claimed_team_seat";
   return null;
 }
@@ -738,267 +806,6 @@ function learnerOutcome(request: RefundRequestRow): LearnerRefundOutcome {
   }
 }
 
-// ─── Refund money states ───
-// Approval creates a Pending Refund. There is no payment provider, so an
-// Admin records by hand whether the money went out: Pending → Issued,
-// Pending → Failed, or Failed → Issued (a retry). Issued is final. The
-// Refund Request stays Approved throughout — the decision and the money are
-// separate.
-
-type RefundRef = { id: number };
-
-/** Why a change to a Refund's state was refused. */
-export type RefundStateRefusal = "no_refund" | "already_issued" | "already_failed";
-
-export type RefundStateOutcome =
-  | { ok: true; refund: RefundRequestRow }
-  | { ok: false; refusal: RefundStateRefusal };
-
-/** What the Admin is told when a change to a Refund's state is refused. */
-export function describeRefundStateRefusal(refusal: RefundStateRefusal) {
-  switch (refusal) {
-    case "no_refund":
-      return "That refund doesn't exist. Only an approved refund request has a refund.";
-    case "already_issued":
-      return "This refund was already issued, so it can't change.";
-    case "already_failed":
-      return "This refund is already marked failed.";
-  }
-}
-
-/** An Admin confirms the money has been sent. Allowed from Pending or Failed. */
-export function markRefundIssued(
-  db: Db,
-  admin: Admin,
-  refund: RefundRef,
-  now: Date = new Date()
-): RefundStateOutcome {
-  return moveRefund(
-    db,
-    refund,
-    [RefundMoneyState.Pending, RefundMoneyState.Failed],
-    RefundMoneyState.Issued,
-    now
-  );
-}
-
-/** An Admin records that the money couldn't be sent. Allowed from Pending. */
-export function markRefundFailed(
-  db: Db,
-  admin: Admin,
-  refund: RefundRef,
-  now: Date = new Date()
-): RefundStateOutcome {
-  return moveRefund(
-    db,
-    refund,
-    [RefundMoneyState.Pending],
-    RefundMoneyState.Failed,
-    now
-  );
-}
-
-/**
- * Moves a Refund to `to` only while it is in one of the `from` states. The
- * state is part of the update's WHERE, so two Admins acting at once can't
- * both win; the loser is told why from the state that beat them.
- */
-function moveRefund(
-  db: Db,
-  refund: RefundRef,
-  from: RefundMoneyState[],
-  to: RefundMoneyState,
-  now: Date
-): RefundStateOutcome {
-  const moved = db
-    .update(refunds)
-    .set({ refundState: to, refundStateChangedAt: now.toISOString() })
-    .where(
-      and(
-        eq(refunds.id, refund.id),
-        eq(refunds.status, RefundStatus.Approved),
-        inArray(refunds.refundState, from)
-      )
-    )
-    .returning()
-    .get();
-  if (moved) return { ok: true, refund: moved };
-
-  const current = db
-    .select({ status: refunds.status, refundState: refunds.refundState })
-    .from(refunds)
-    .where(eq(refunds.id, refund.id))
-    .get();
-
-  if (current?.status !== RefundStatus.Approved) {
-    return { ok: false, refusal: "no_refund" };
-  }
-  if (current.refundState === RefundMoneyState.Issued) {
-    return { ok: false, refusal: "already_issued" };
-  }
-  return { ok: false, refusal: "already_failed" };
-}
-
-export type OutstandingRefund = {
-  /** The Approved Refund Request this Refund belongs to. */
-  id: number;
-  refundState: RefundMoneyState;
-  refundStateChangedAt: string | null;
-  amountRefunded: number;
-  approvedAt: string | null;
-  learner: { id: number; name: string; email: string };
-  course: { id: number; title: string; slug: string };
-};
-
-/**
- * Refunds whose money hasn't been confirmed as sent — Pending and Failed —
- * oldest approval first. Issued Refunds are done and drop off.
- */
-export function listOutstandingRefunds(db: Db): OutstandingRefund[] {
-  return db
-    .select({
-      id: refunds.id,
-      refundState: refunds.refundState,
-      refundStateChangedAt: refunds.refundStateChangedAt,
-      amountRefunded: refunds.amountRefunded,
-      approvedAt: refunds.resolvedAt,
-      learner: { id: users.id, name: users.name, email: users.email },
-      course: { id: courses.id, title: courses.title, slug: courses.slug },
-    })
-    .from(refunds)
-    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
-    .innerJoin(users, eq(purchases.userId, users.id))
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(
-      and(
-        eq(refunds.status, RefundStatus.Approved),
-        inArray(refunds.refundState, [
-          RefundMoneyState.Pending,
-          RefundMoneyState.Failed,
-        ])
-      )
-    )
-    .orderBy(asc(refunds.resolvedAt), asc(refunds.id))
-    .all()
-    .flatMap(({ refundState, amountRefunded, ...rest }) =>
-      refundState === null || amountRefunded === null
-        ? []
-        : [{ ...rest, refundState, amountRefunded }]
-    );
-}
-
-// ─── Emails ───
-// There is no mail transport yet, so built emails go to the server log.
-
-export type RefundEmail = { to: string; subject: string; body: string };
-
-function sendEmail(email: RefundEmail) {
-  console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
-}
-
-function emailContext(db: Db, purchase: Purchase) {
-  const learner = db
-    .select({ name: users.name, email: users.email })
-    .from(users)
-    .where(eq(users.id, purchase.userId))
-    .get();
-  const course = db
-    .select({ title: courses.title })
-    .from(courses)
-    .where(eq(courses.id, purchase.courseId))
-    .get();
-
-  return {
-    to: learner?.email ?? "",
-    learnerName: learner?.name ?? "there",
-    courseTitle: course?.title ?? "your course",
-  };
-}
-
-function buildRefundApprovedEmail(db: Db, purchase: Purchase): RefundEmail {
-  const { to, learnerName, courseTitle } = emailContext(db, purchase);
-
-  return {
-    to,
-    subject: `Refund approved — ${courseTitle}`,
-    body: [
-      `Hi ${learnerName},`,
-      "",
-      `We have approved your refund request for "${courseTitle}".`,
-      `We are sending you ${formatPrice(purchase.amountPaid)}, the full amount you paid.`,
-      "Your access to the course has ended. If you buy it again later, your progress will be waiting for you.",
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
-}
-
-function buildRefundDeclinedEmail(
-  db: Db,
-  purchase: Purchase,
-  declineReason: string
-): RefundEmail {
-  const { to, learnerName, courseTitle } = emailContext(db, purchase);
-
-  return {
-    to,
-    subject: `Refund request declined — ${courseTitle}`,
-    body: [
-      `Hi ${learnerName},`,
-      "",
-      `We have looked at your refund request for "${courseTitle}" and declined it.`,
-      "",
-      "Our reason:",
-      declineReason,
-      "",
-      "You keep full access to the course.",
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
-}
-
-function buildDiscretionaryRefundRequestedEmail(
-  db: Db,
-  purchase: Purchase
-): RefundEmail {
-  const { to, learnerName, courseTitle } = emailContext(db, purchase);
-
-  return {
-    to,
-    subject: `Refund requested — ${courseTitle}`,
-    body: [
-      `Hi ${learnerName},`,
-      "",
-      `Our team has raised a refund request on your behalf for "${courseTitle}".`,
-      `The refund is for ${formatPrice(purchase.amountPaid)}, the amount you paid.`,
-      "",
-      "Another member of our team will review it. You do not need to do anything — we will email you again when it is done.",
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
-}
-
-function buildRefundRequestedEmail(db: Db, purchase: Purchase): RefundEmail {
-  const { to, learnerName, courseTitle } = emailContext(db, purchase);
-
-  return {
-    to,
-    subject: `Refund requested — ${courseTitle}`,
-    body: [
-      `Hi ${learnerName},`,
-      "",
-      `We have your refund request for "${courseTitle}".`,
-      `The refund is for ${formatPrice(purchase.amountPaid)}, the amount you paid.`,
-      "",
-      "Our team reviews every refund request by hand. You do not need to do anything else — we will email you again when it is done.",
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
-}
-
 // ─── Eligibility helpers ───
 
 function hasOpenRefundRequest(db: Db, purchaseId: number) {
@@ -1009,6 +816,19 @@ function hasOpenRefundRequest(db: Db, purchaseId: number) {
       and(
         eq(refunds.purchaseId, purchaseId),
         eq(refunds.status, RefundStatus.Open)
+      )
+    )
+    .get();
+}
+
+function hasApprovedRefundRequest(db: Db, purchaseId: number) {
+  return !!db
+    .select({ id: refunds.id })
+    .from(refunds)
+    .where(
+      and(
+        eq(refunds.purchaseId, purchaseId),
+        eq(refunds.status, RefundStatus.Approved)
       )
     )
     .get();
@@ -1030,6 +850,52 @@ function hasApprovedRefundForCourse(
         eq(refunds.status, RefundStatus.Approved)
       )
     )
+    .get();
+}
+
+function hasUnrefundedPurchaseOfCourse(
+  db: Db,
+  learnerId: number,
+  courseId: number
+) {
+  return !!db
+    .select({ id: purchases.id })
+    .from(purchases)
+    .where(
+      and(
+        eq(purchases.userId, learnerId),
+        eq(purchases.courseId, courseId),
+        notExists(
+          db
+            .select({ id: refunds.id })
+            .from(refunds)
+            .where(
+              and(
+                eq(refunds.purchaseId, purchases.id),
+                eq(refunds.status, RefundStatus.Approved)
+              )
+            )
+        )
+      )
+    )
+    .get();
+}
+
+function isEnrolled(db: Db, learnerId: number, courseId: number) {
+  return !!db
+    .select({ id: enrollments.id })
+    .from(enrollments)
+    .where(
+      and(eq(enrollments.userId, learnerId), eq(enrollments.courseId, courseId))
+    )
+    .get();
+}
+
+function isTeamPurchase(db: Db, purchaseId: number) {
+  return !!db
+    .select({ id: coupons.id })
+    .from(coupons)
+    .where(eq(coupons.purchaseId, purchaseId))
     .get();
 }
 

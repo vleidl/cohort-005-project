@@ -14,7 +14,6 @@ import {
   enrollments,
   lessonProgress,
   courseRatings,
-  coupons,
   LessonProgressStatus,
 } from "~/db/schema";
 import { eq, and, or, sql } from "drizzle-orm";
@@ -45,10 +44,7 @@ import { data, isRouteErrorResponse } from "react-router";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
-import {
-  calculatePppPrice,
-  getCountryTierInfo,
-} from "~/lib/ppp";
+import { calculatePppPrice, getCountryTierInfo } from "~/lib/ppp";
 import { parseFormData } from "~/lib/validation";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
 import {
@@ -56,11 +52,8 @@ import {
   getCourseRatingSummaries,
 } from "~/lib/ratings.server";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
-import {
-  checkRefundEligibility,
-  describeRefundIneligibility,
-  findLatestPurchase,
-} from "~/lib/refunds.server";
+import { canRefundRepurchase, getRefundOffer } from "~/lib/refunds.server";
+import { REFUND_INELIGIBILITY } from "~/lib/refund-refusals.server";
 
 function getCourseBySlug(slug: string) {
   return db.select().from(courses).where(eq(courses.slug, slug)).get();
@@ -304,7 +297,10 @@ function findRating(userId: number, courseId: number) {
     .select()
     .from(courseRatings)
     .where(
-      and(eq(courseRatings.userId, userId), eq(courseRatings.courseId, courseId))
+      and(
+        eq(courseRatings.userId, userId),
+        eq(courseRatings.courseId, courseId)
+      )
     )
     .get();
 }
@@ -344,48 +340,18 @@ function rateCourse(userId: number, courseId: number, rating: number) {
     .get();
 }
 
-type RefundOffer =
+/** The refund offer as the page shows it: the rule becomes its message. */
+type RefundOfferView =
   | { available: true; amount: number; lastDayInWindow: string }
   | { available: false; reason: string };
 
-/**
- * Whether the learner is offered a refund on their latest purchase, and if
- * not, why. Asks the same Refund Eligibility check as the refund action, so
- * the page never offers a refund the action would refuse.
- */
-function getRefundOffer(
+function viewRefundOffer(
   userId: number,
-  courseId: number,
-  enrolled: boolean
-): RefundOffer | null {
-  const purchase = findLatestPurchase(db, userId, courseId);
-  if (!purchase) return null;
-
-  // A team buyer isn't enrolled — the seats are for their team — but can
-  // still refund a team Purchase nobody has claimed a seat from.
-  if (!enrolled && !isTeamPurchase(purchase.id)) return null;
-
-  const eligibility = checkRefundEligibility(db, { id: userId }, purchase);
-  if (!eligibility.eligible) {
-    return {
-      available: false,
-      reason: describeRefundIneligibility(eligibility.rule),
-    };
-  }
-
-  return {
-    available: true,
-    amount: eligibility.amount,
-    lastDayInWindow: eligibility.lastDayInWindow,
-  };
-}
-
-function isTeamPurchase(purchaseId: number) {
-  return !!db
-    .select({ id: coupons.id })
-    .from(coupons)
-    .where(eq(coupons.purchaseId, purchaseId))
-    .get();
+  courseId: number
+): RefundOfferView | null {
+  const offer = getRefundOffer(db, { id: userId }, courseId);
+  if (!offer || offer.available) return offer;
+  return { available: false, reason: REFUND_INELIGIBILITY[offer.rule].message };
 }
 
 const ratingSchema = z.object({
@@ -420,14 +386,19 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
-  let refundOffer: RefundOffer | null = null;
+  let refundOffer: RefundOfferView | null = null;
+  let repurchaseRefundable = true;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
-    refundOffer = getRefundOffer(currentUserId, course.id, enrolled);
+    refundOffer = viewRefundOffer(currentUserId, course.id);
+    repurchaseRefundable = canRefundRepurchase(
+      db,
+      { id: currentUserId },
+      course.id
+    );
 
     if (enrolled) {
-
       progress = calculateProgress(currentUserId, course.id, false);
 
       const progressRecords = getLessonProgressForCourse(
@@ -473,6 +444,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     ratingSummary,
     userRating,
     refundOffer,
+    repurchaseRefundable,
   };
 }
 
@@ -574,6 +546,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     ratingSummary,
     userRating,
     refundOffer,
+    repurchaseRefundable,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -654,6 +627,12 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
           </Link>
         </TabsContent>
       </TabsContentNoShift>
+      {!repurchaseRefundable && (
+        <p className="mt-3 text-xs text-muted-foreground">
+          You have already had a refund for this course. If you buy it again,
+          that purchase can&apos;t be refunded.
+        </p>
+      )}
     </Tabs>
   );
 
@@ -889,7 +868,7 @@ function RefundOfferPanel({
   offer,
 }: {
   slug: string;
-  offer: RefundOffer | null;
+  offer: RefundOfferView | null;
 }) {
   if (!offer) return null;
   if (offer.available) {
