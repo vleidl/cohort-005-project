@@ -14,7 +14,9 @@ import {
   approveRefundRequest,
   checkRefundEligibility,
   declineRefundRequest,
+  describeLearnerRefundOutcome,
   listOpenRefundRequests,
+  listRefundRequestsForLearner,
   raiseRefundRequest,
   type RefundIneligibility,
 } from "./refunds.server";
@@ -602,5 +604,95 @@ describe("the refund queue", () => {
         declineReason: "Try the second module first.",
       }),
     ]);
+  });
+});
+
+describe("a learner's Refund Requests in Settings", () => {
+  // Decided requests stay listed, so the learner can follow the outcome.
+  it("lists all of the learner's requests, including decided ones", () => {
+    const other = addUser(db, "Other Learner");
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    const declined = raise(base.user, purchase, "First ask.");
+    declineRefundRequest(db, admin, declined, "Try the second module first.");
+    const approved = raise(base.user, purchase, "Second ask.");
+    approveRefundRequest(db, admin, approved);
+    raise(other, buyCourse(db, other.id, base.course.id));
+
+    expect(
+      listRefundRequestsForLearner(db, base.user)
+        .map((r) => r.id)
+        .sort()
+    ).toEqual([declined.id, approved.id].sort());
+  });
+
+  /** The outcome text Settings shows for the learner's only request. */
+  function shownOutcome() {
+    const [refundRequest] = listRefundRequestsForLearner(db, base.user);
+    return describeLearnerRefundOutcome(refundRequest.outcome);
+  }
+
+  it("shows an Open Refund Request as waiting on us", () => {
+    raise(base.user, buyCourse(db, base.user.id, base.course.id));
+
+    expect(shownOutcome()).toBe("Waiting on us");
+  });
+
+  it("shows an approved request as Refund pending until the money is sent", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    approveRefundRequest(db, admin, raise(base.user, purchase));
+
+    expect(shownOutcome()).toBe("Refund pending");
+  });
+
+  /**
+   * An Admin moves the Refund's money state. Written directly until the
+   * money-state operations (#14) exist; swap in markRefundIssued /
+   * markRefundFailed then.
+   */
+  function setRefundState(
+    refundRequest: { id: number },
+    refundState: schema.RefundMoneyState
+  ) {
+    db.update(schema.refunds)
+      .set({ refundState, refundStateChangedAt: new Date().toISOString() })
+      .where(eq(schema.refunds.id, refundRequest.id))
+      .run();
+  }
+
+  it("shows Refund issued once the money has gone out", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    const refundRequest = raise(base.user, purchase);
+    approveRefundRequest(db, admin, refundRequest);
+    setRefundState(refundRequest, schema.RefundMoneyState.Issued);
+
+    expect(shownOutcome()).toBe("Refund issued");
+  });
+
+  // A failed send is a problem only an Admin can fix, so the learner isn't
+  // alarmed by it: to them the money is still on its way.
+  it("never shows a Failed Refund as failed — it stays Refund pending", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    const refundRequest = raise(base.user, purchase);
+    approveRefundRequest(db, admin, refundRequest);
+    setRefundState(refundRequest, schema.RefundMoneyState.Failed);
+
+    expect(shownOutcome()).toBe("Refund pending");
+  });
+
+  it("shows a declined request with the Admin's reason", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    declineRefundRequest(
+      db,
+      admin,
+      raise(base.user, purchase, "Not for me."),
+      "You have finished most of the course."
+    );
+
+    const [refundRequest] = listRefundRequestsForLearner(db, base.user);
+
+    expect(refundRequest.reason).toBe("Not for me.");
+    expect(describeLearnerRefundOutcome(refundRequest.outcome)).toBe(
+      "Declined: You have finished most of the course."
+    );
   });
 });
