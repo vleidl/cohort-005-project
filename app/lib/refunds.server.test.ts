@@ -14,14 +14,19 @@ import {
   approveRefundRequest,
   checkRefundEligibility,
   declineRefundRequest,
+  describeLearnerRefundOutcome,
   listOpenRefundRequests,
   listOutstandingRefunds,
+  listPurchasesForDiscretionaryRefund,
+  listRefundRequestsForLearner,
   markRefundFailed,
   markRefundIssued,
+  raiseDiscretionaryRefundRequest,
   raiseRefundRequest,
   type RefundIneligibility,
 } from "./refunds.server";
 import { getAccess, requireAdmin } from "./access.server";
+import { redeemCoupon } from "./coupons.server";
 
 let db: ReturnType<typeof createTestDb>;
 let base: ReturnType<typeof seedBaseData>;
@@ -608,6 +613,237 @@ describe("the refund queue", () => {
   });
 });
 
+describe("Discretionary Refund Requests", () => {
+  // One Refund per course stops the normal route after a repurchase, but an
+  // Admin can still set the rules aside for a genuinely exceptional case.
+  it("lets an Admin raise one where Refund Eligibility says no", () => {
+    approveRefundRequest(
+      db,
+      admin,
+      raise(base.user, buyCourse(db, base.user.id, base.course.id))
+    );
+    const repurchase = buyCourse(db, base.user.id, base.course.id);
+    expectBlockedBy(base.user, repurchase, "already_refunded");
+
+    const outcome = raiseDiscretionaryRefundRequest(
+      db,
+      admin,
+      base.user,
+      repurchase,
+      "Charged twice by mistake."
+    );
+
+    expect(outcome.ok).toBe(true);
+    const [entry] = listOpenRefundRequests(db);
+    expect(entry).toMatchObject({
+      purchase: { id: repurchase.id },
+      reason: "Charged twice by mistake.",
+      discretionary: true,
+      raisedBy: { id: admin.id, name: "Admin" },
+    });
+  });
+
+  // A claimed seat belongs to the team member who claimed it, and one
+  // purchase never has two undecided requests — discretion doesn't change that.
+  it("never overrides a claimed team seat", () => {
+    const { purchase, coupon } = teamPurchaseWithCoupon(base.user.id);
+    const member = addUser(db, "Team Member");
+    db.update(schema.coupons)
+      .set({ redeemedByUserId: member.id, redeemedAt: new Date().toISOString() })
+      .where(eq(schema.coupons.id, coupon.id))
+      .run();
+
+    expect(
+      raiseDiscretionaryRefundRequest(db, admin, base.user, purchase, "Please.")
+    ).toEqual({ ok: false, rule: "claimed_team_seat" });
+  });
+
+  it("never overrides an existing Open Refund Request", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    raise(base.user, purchase);
+
+    expect(
+      raiseDiscretionaryRefundRequest(db, admin, base.user, purchase, "Please.")
+    ).toEqual({ ok: false, rule: "request_already_open" });
+    expect(listOpenRefundRequests(db)).toHaveLength(1);
+  });
+
+  // One person can't send money out against the rules alone.
+  it("refuses the raising Admin deciding it, and lets a different Admin", () => {
+    const otherAdmin = addUser(db, "Other Admin", schema.UserRole.Admin);
+    const request = raiseDiscretionary(
+      buyCourse(db, base.user.id, base.course.id)
+    );
+
+    expect(approveRefundRequest(db, admin, request)).toEqual({
+      ok: false,
+      refusal: "own_discretionary_request",
+    });
+    expect(declineRefundRequest(db, admin, request, "No.")).toEqual({
+      ok: false,
+      refusal: "own_discretionary_request",
+    });
+
+    expect(approveRefundRequest(db, otherAdmin, request).ok).toBe(true);
+  });
+
+  // With no second Admin, nobody can decide it — say so rather than leave
+  // the raiser wondering why it's stuck.
+  it("is blocked and flagged while its raiser is the only Admin", () => {
+    const request = raiseDiscretionary(
+      buyCourse(db, base.user.id, base.course.id)
+    );
+
+    expect(approveRefundRequest(db, admin, request)).toEqual({
+      ok: false,
+      refusal: "sole_admin_discretionary_request",
+    });
+    expect(declineRefundRequest(db, admin, request, "No.")).toEqual({
+      ok: false,
+      refusal: "sole_admin_discretionary_request",
+    });
+    expect(listOpenRefundRequests(db)).toEqual([
+      expect.objectContaining({ id: request.id, soleAdminWarning: true }),
+    ]);
+
+    const secondAdmin = addUser(db, "Second Admin", schema.UserRole.Admin);
+    expect(listOpenRefundRequests(db)).toEqual([
+      expect.objectContaining({ id: request.id, soleAdminWarning: false }),
+    ]);
+    expect(declineRefundRequest(db, secondAdmin, request, "No.").ok).toBe(true);
+  });
+
+  // The Admin picks the learner's purchase to raise one for.
+  it("offers every purchase to choose from, newest first", () => {
+    const older = buyCourse(db, base.user.id, base.course.id, {
+      amountPaid: 4900,
+      purchasedAt: daysAgo(40),
+    });
+    const second = addUser(db, "Second Learner");
+    const newer = buyCourse(db, second.id, base.course.id, {
+      amountPaid: 7900,
+      purchasedAt: daysAgo(2),
+    });
+
+    expect(listPurchasesForDiscretionaryRefund(db)).toEqual([
+      {
+        id: newer.id,
+        amountPaid: 7900,
+        purchasedAt: newer.createdAt,
+        learner: { id: second.id, name: "Second Learner", email: second.email },
+        course: { id: base.course.id, title: "Test Course" },
+      },
+      {
+        id: older.id,
+        amountPaid: 4900,
+        purchasedAt: older.createdAt,
+        learner: { id: base.user.id, name: "Test User", email: base.user.email },
+        course: { id: base.course.id, title: "Test Course" },
+      },
+    ]);
+  });
+
+  it("doesn't flag ordinary Refund Requests", () => {
+    raise(base.user, buyCourse(db, base.user.id, base.course.id));
+
+    expect(listOpenRefundRequests(db)).toEqual([
+      expect.objectContaining({
+        discretionary: false,
+        raisedBy: null,
+        soleAdminWarning: false,
+      }),
+    ]);
+  });
+});
+
+/** An Admin raises a Discretionary Refund Request the scenario expects to succeed. */
+function raiseDiscretionary(purchase: typeof schema.purchases.$inferSelect) {
+  const outcome = raiseDiscretionaryRefundRequest(
+    db,
+    admin,
+    { id: purchase.userId },
+    purchase,
+    "Exceptional circumstances."
+  );
+  if (!outcome.ok) throw new Error(`expected a request, got ${outcome.rule}`);
+  return outcome.refundRequest;
+}
+
+describe("a learner's Refund Requests in Settings", () => {
+  // Decided requests stay listed, so the learner can follow the outcome.
+  it("lists all of the learner's requests, including decided ones", () => {
+    const other = addUser(db, "Other Learner");
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    const declined = raise(base.user, purchase, "First ask.");
+    declineRefundRequest(db, admin, declined, "Try the second module first.");
+    const approved = raise(base.user, purchase, "Second ask.");
+    approveRefundRequest(db, admin, approved);
+    raise(other, buyCourse(db, other.id, base.course.id));
+
+    expect(
+      listRefundRequestsForLearner(db, base.user)
+        .map((r) => r.id)
+        .sort()
+    ).toEqual([declined.id, approved.id].sort());
+  });
+
+  /** The outcome text Settings shows for the learner's only request. */
+  function shownOutcome() {
+    const [refundRequest] = listRefundRequestsForLearner(db, base.user);
+    return describeLearnerRefundOutcome(refundRequest.outcome);
+  }
+
+  it("shows an Open Refund Request as waiting on us", () => {
+    raise(base.user, buyCourse(db, base.user.id, base.course.id));
+
+    expect(shownOutcome()).toBe("Waiting on us");
+  });
+
+  it("shows an approved request as Refund pending until the money is sent", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    approveRefundRequest(db, admin, raise(base.user, purchase));
+
+    expect(shownOutcome()).toBe("Refund pending");
+  });
+
+  it("shows Refund issued once the money has gone out", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    const refundRequest = raise(base.user, purchase);
+    approveRefundRequest(db, admin, refundRequest);
+    markRefundIssued(db, admin, refundRequest);
+
+    expect(shownOutcome()).toBe("Refund issued");
+  });
+
+  // A failed send is a problem only an Admin can fix, so the learner isn't
+  // alarmed by it: to them the money is still on its way.
+  it("never shows a Failed Refund as failed — it stays Refund pending", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    const refundRequest = raise(base.user, purchase);
+    approveRefundRequest(db, admin, refundRequest);
+    markRefundFailed(db, admin, refundRequest);
+
+    expect(shownOutcome()).toBe("Refund pending");
+  });
+
+  it("shows a declined request with the Admin's reason", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    declineRefundRequest(
+      db,
+      admin,
+      raise(base.user, purchase, "Not for me."),
+      "You have finished most of the course."
+    );
+
+    const [refundRequest] = listRefundRequestsForLearner(db, base.user);
+
+    expect(refundRequest.reason).toBe("Not for me.");
+    expect(describeLearnerRefundOutcome(refundRequest.outcome)).toBe(
+      "Declined: You have finished most of the course."
+    );
+  });
+});
+
 describe("moving the money for a Refund", () => {
   function approvedRefund(learner = base.user, amountPaid = 4900) {
     const purchase = buyCourse(db, learner.id, base.course.id, { amountPaid });
@@ -724,6 +960,59 @@ describe("moving the money for a Refund", () => {
         ok: false,
         refusal: "no_refund",
       });
+    }
+  });
+});
+
+describe("refunding a team Purchase", () => {
+  // The team buyer isn't enrolled themselves: the seats are for the team.
+  function buyTeamSeats(buyerId: number, seats: number) {
+    const purchase = db
+      .insert(schema.purchases)
+      .values({
+        userId: buyerId,
+        courseId: base.course.id,
+        amountPaid: 4900 * seats,
+      })
+      .returning()
+      .get();
+    const team = db.insert(schema.teams).values({}).returning().get();
+    const codes = Array.from({ length: seats }, (_, i) => {
+      const code = `SEAT-${purchase.id}-${i}`;
+      db.insert(schema.coupons)
+        .values({
+          teamId: team.id,
+          courseId: base.course.id,
+          code,
+          purchaseId: purchase.id,
+        })
+        .run();
+      return code;
+    });
+    return { purchase, codes };
+  }
+
+  // Seats that were paid back must not still let someone in.
+  it("voids every unclaimed Coupon on approval, so none of its seats can be redeemed", async () => {
+    const buyer = addUser(db, "Team Buyer");
+    const { purchase, codes } = buyTeamSeats(buyer.id, 3);
+
+    expect(approveRefundRequest(db, admin, raise(buyer, purchase)).ok).toBe(
+      true
+    );
+
+    for (const code of codes) {
+      const teamMember = addUser(db, "Team Member");
+      expect(redeemCoupon(db, code, teamMember.id, "")).toEqual({
+        ok: false,
+        error: "This coupon was cancelled because its purchase was refunded.",
+      });
+      const access = await getAccess(
+        db,
+        await requestAs(teamMember.id),
+        base.course.id
+      );
+      expect(access.enrolled).toBe(false);
     }
   });
 });
