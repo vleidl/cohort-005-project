@@ -65,26 +65,6 @@ export type RefundEligibility =
   | { eligible: true; amount: number; lastDayInWindow: string }
   | { eligible: false; rule: RefundIneligibility };
 
-/** What the learner is told when a rule stops them. */
-export function describeRefundIneligibility(rule: RefundIneligibility) {
-  switch (rule) {
-    case "not_purchaser":
-      return "Only the person who bought this course can ask for a refund.";
-    case "request_already_open":
-      return "You already have an open refund request on this purchase. We will email you when it is decided.";
-    case "already_refunded":
-      return "You have already had a refund for this course, so this purchase can't be refunded.";
-    case "claimed_team_seat":
-      return "A team seat from this purchase has been claimed, so it can't be refunded.";
-    case "window_closed":
-      return `The ${REFUND_WINDOW_DAYS}-day refund window has closed.`;
-    case "watched_too_much":
-      return "You have watched more than 2 hours of this course, so it can't be refunded.";
-    case "completed_too_much":
-      return "You have completed half or more of this course's lessons, so it can't be refunded.";
-  }
-}
-
 /** The learner's most recent purchase of a course, if any. */
 export function findLatestPurchase(
   db: Db,
@@ -372,26 +352,6 @@ export type DecisionRefusal =
   | "own_discretionary_request"
   | "sole_admin_discretionary_request";
 
-/** What the Admin is told when a decision is refused. */
-export function describeDecisionRefusal(refusal: DecisionRefusal) {
-  switch (refusal) {
-    case "not_admin":
-      return NOT_ADMIN_MESSAGE;
-    case "not_found":
-      return "That refund request doesn't exist.";
-    case "already_decided":
-      return "This request was already decided.";
-    case "own_request":
-      return "You can't decide a refund request on your own purchase.";
-    case "decline_reason_missing":
-      return "Give the learner a reason for declining.";
-    case "own_discretionary_request":
-      return "You raised this Discretionary Refund Request, so a different Admin has to decide it.";
-    case "sole_admin_discretionary_request":
-      return "You raised this Discretionary Refund Request and you are the only Admin. It can't be decided until a second Admin exists.";
-  }
-}
-
 function refuse(refusal: DecisionRefusal) {
   return { ok: false as const, refusal };
 }
@@ -644,24 +604,6 @@ export type DiscretionaryRefundIneligibility =
 export type DiscretionaryRefusal =
   DiscretionaryRefundIneligibility | "not_admin";
 
-/** What the Admin is told when a rule stops a Discretionary Refund Request. */
-export function describeDiscretionaryRefundIneligibility(
-  rule: DiscretionaryRefusal
-) {
-  switch (rule) {
-    case "not_purchaser":
-      return "That learner didn't make this purchase.";
-    case "request_already_open":
-      return "This purchase already has an Open Refund Request. Decide that one instead.";
-    case "claimed_team_seat":
-      return "A team seat from this purchase has been claimed, so it can't be refunded.";
-    case "purchase_already_refunded":
-      return "This purchase has already been refunded.";
-    case "not_admin":
-      return NOT_ADMIN_MESSAGE;
-  }
-}
-
 export type RaiseDiscretionaryRefundRequestOutcome =
   | {
       ok: true;
@@ -741,8 +683,6 @@ export function listPurchasesForDiscretionaryRefund(
     .orderBy(desc(purchases.createdAt), desc(purchases.id))
     .all();
 }
-
-const NOT_ADMIN_MESSAGE = "Only Admins can do that.";
 
 /**
  * Callers pass an Admin, but the module checks the role itself: no route
@@ -879,20 +819,6 @@ export type RefundStateRefusal =
 
 export type RefundStateOutcome =
   { ok: true; refund: Refund } | { ok: false; refusal: RefundStateRefusal };
-
-/** What the Admin is told when a change to a Refund's state is refused. */
-export function describeRefundStateRefusal(refusal: RefundStateRefusal) {
-  switch (refusal) {
-    case "not_admin":
-      return NOT_ADMIN_MESSAGE;
-    case "no_refund":
-      return "That refund doesn't exist. Only an approved refund request has a refund.";
-    case "already_issued":
-      return "This refund was already issued, so it can't change.";
-    case "already_failed":
-      return "This refund is already marked failed.";
-  }
-}
 
 /** An Admin confirms the money has been sent. Allowed from Pending or Failed. */
 export function markRefundIssued(

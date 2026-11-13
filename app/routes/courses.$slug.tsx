@@ -52,11 +52,8 @@ import {
   getCourseRatingSummaries,
 } from "~/lib/ratings.server";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
-import {
-  canRefundRepurchase,
-  describeRefundIneligibility,
-  getRefundOffer,
-} from "~/lib/refunds.server";
+import { canRefundRepurchase, getRefundOffer } from "~/lib/refunds.server";
+import { REFUND_INELIGIBILITY } from "~/lib/refund-refusals.server";
 
 function getCourseBySlug(slug: string) {
   return db.select().from(courses).where(eq(courses.slug, slug)).get();
@@ -354,7 +351,7 @@ function viewRefundOffer(
 ): RefundOfferView | null {
   const offer = getRefundOffer(db, { id: userId }, courseId);
   if (!offer || offer.available) return offer;
-  return { available: false, reason: describeRefundIneligibility(offer.rule) };
+  return { available: false, reason: REFUND_INELIGIBILITY[offer.rule].message };
 }
 
 const ratingSchema = z.object({

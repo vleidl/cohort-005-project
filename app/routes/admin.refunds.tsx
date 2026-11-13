@@ -9,21 +9,22 @@ import { requireAdmin } from "~/lib/access.server";
 import {
   approveRefundRequest,
   declineRefundRequest,
-  describeDecisionRefusal,
-  describeDiscretionaryRefundIneligibility,
   listOpenRefundRequests,
   listPurchasesForDiscretionaryRefund,
   raiseDiscretionaryRefundRequest,
-  describeRefundStateRefusal,
   listOutstandingRefunds,
   markRefundFailed,
   markRefundIssued,
-  type DecisionRefusal,
   type OutstandingRefund,
   type PurchaseForDiscretionaryRefund,
   type RefundQueueEntry,
-  type RefundStateRefusal,
 } from "~/lib/refunds.server";
+import {
+  DECISION_REFUSALS,
+  DISCRETIONARY_REFUSALS,
+  REFUND_STATE_REFUSALS,
+  throwRefusal,
+} from "~/lib/refund-refusals.server";
 import { eq } from "drizzle-orm";
 import { purchases } from "~/db/schema";
 import { parseFormData } from "~/lib/validation";
@@ -107,8 +108,10 @@ export async function action({ request }: Route.ActionArgs) {
       const outcome = approveRefundRequest(db, admin, {
         id: form.refundRequestId,
       });
-      if (!outcome.ok) throwRefusal(outcome.refusal);
-      return { message: "Refund Request approved. The learner has been emailed." };
+      if (!outcome.ok) throwRefusal(DECISION_REFUSALS, outcome.refusal);
+      return {
+        message: "Refund Request approved. The learner has been emailed.",
+      };
     }
     case "decline": {
       const outcome = declineRefundRequest(
@@ -117,8 +120,10 @@ export async function action({ request }: Route.ActionArgs) {
         { id: form.refundRequestId },
         form.declineReason
       );
-      if (!outcome.ok) throwRefusal(outcome.refusal);
-      return { message: "Refund Request declined. The learner has been emailed." };
+      if (!outcome.ok) throwRefusal(DECISION_REFUSALS, outcome.refusal);
+      return {
+        message: "Refund Request declined. The learner has been emailed.",
+      };
     }
     case "raise_discretionary": {
       const purchase = db
@@ -126,7 +131,8 @@ export async function action({ request }: Route.ActionArgs) {
         .from(purchases)
         .where(eq(purchases.id, form.purchaseId))
         .get();
-      if (!purchase) throw data("That purchase doesn't exist.", { status: 404 });
+      if (!purchase)
+        throw data("That purchase doesn't exist.", { status: 404 });
 
       const outcome = raiseDiscretionaryRefundRequest(
         db,
@@ -135,11 +141,7 @@ export async function action({ request }: Route.ActionArgs) {
         purchase,
         form.reason
       );
-      if (!outcome.ok) {
-        throw data(describeDiscretionaryRefundIneligibility(outcome.rule), {
-          status: 422,
-        });
-      }
+      if (!outcome.ok) throwRefusal(DISCRETIONARY_REFUSALS, outcome.rule);
       return {
         message:
           "Discretionary Refund Request raised. A different Admin has to decide it.",
@@ -147,40 +149,17 @@ export async function action({ request }: Route.ActionArgs) {
     }
     case "mark_issued": {
       const outcome = markRefundIssued(db, admin, { id: form.refundId });
-      if (!outcome.ok) throwRefundStateRefusal(outcome.refusal);
+      if (!outcome.ok) throwRefusal(REFUND_STATE_REFUSALS, outcome.refusal);
       return { message: "Refund marked Issued." };
     }
     case "mark_failed": {
       const outcome = markRefundFailed(db, admin, { id: form.refundId });
-      if (!outcome.ok) throwRefundStateRefusal(outcome.refusal);
-      return { message: "Refund marked Failed. Retry and mark it Issued once sent." };
+      if (!outcome.ok) throwRefusal(REFUND_STATE_REFUSALS, outcome.refusal);
+      return {
+        message: "Refund marked Failed. Retry and mark it Issued once sent.",
+      };
     }
   }
-}
-
-function throwRefusal(refusal: DecisionRefusal): never {
-  const status = {
-    not_admin: 403,
-    not_found: 404,
-    already_decided: 409,
-    own_request: 403,
-    decline_reason_missing: 400,
-    own_discretionary_request: 403,
-    sole_admin_discretionary_request: 403,
-  } satisfies Record<DecisionRefusal, number>;
-
-  throw data(describeDecisionRefusal(refusal), { status: status[refusal] });
-}
-
-function throwRefundStateRefusal(refusal: RefundStateRefusal): never {
-  const status = {
-    not_admin: 403,
-    no_refund: 404,
-    already_issued: 409,
-    already_failed: 409,
-  } satisfies Record<RefundStateRefusal, number>;
-
-  throw data(describeRefundStateRefusal(refusal), { status: status[refusal] });
 }
 
 export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
@@ -211,7 +190,9 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
       <div className="space-y-10">
         <RefundQueueSection entries={openRefundRequests} adminId={adminId} />
         <RefundsSection refunds={outstandingRefunds} />
-        <DiscretionaryRefundSection purchases={purchasesForDiscretionaryRefund} />
+        <DiscretionaryRefundSection
+          purchases={purchasesForDiscretionaryRefund}
+        />
         {/* Further sections go here. */}
       </div>
     </div>
@@ -239,7 +220,9 @@ function RefundQueueSection({
         <Card>
           <CardContent className="py-8 text-center">
             <ReceiptText className="mx-auto mb-3 size-8 text-muted-foreground/50" />
-            <p className="text-muted-foreground">No Refund Requests are waiting.</p>
+            <p className="text-muted-foreground">
+              No Refund Requests are waiting.
+            </p>
           </CardContent>
         </Card>
       ) : (
@@ -292,7 +275,9 @@ function RefundQueueCard({
             </Link>
           </div>
           <div className="text-right text-sm">
-            <p className="font-semibold">{formatPrice(entry.purchase.amountPaid)}</p>
+            <p className="font-semibold">
+              {formatPrice(entry.purchase.amountPaid)}
+            </p>
             <p className="text-muted-foreground">
               Bought {formatDate(entry.purchase.purchasedAt)} · asked{" "}
               {formatDate(entry.requestedAt)}
@@ -300,17 +285,26 @@ function RefundQueueCard({
           </div>
         </div>
 
-        <blockquote className="border-l-2 pl-3 text-sm">{entry.reason}</blockquote>
+        <blockquote className="border-l-2 pl-3 text-sm">
+          {entry.reason}
+        </blockquote>
 
         <dl className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
           <div>
             <dt className="inline text-muted-foreground">Watched: </dt>
             <dd className="inline">
-              {formatDuration(Math.round(entry.secondsWatched / 60), true, false, false)}
+              {formatDuration(
+                Math.round(entry.secondsWatched / 60),
+                true,
+                false,
+                false
+              )}
             </dd>
           </div>
           <div>
-            <dt className="inline text-muted-foreground">Lessons completed: </dt>
+            <dt className="inline text-muted-foreground">
+              Lessons completed:{" "}
+            </dt>
             <dd className="inline">
               {entry.lessonsCompleted} of {entry.lessonCount}
             </dd>
@@ -319,12 +313,17 @@ function RefundQueueCard({
 
         {entry.earlierRequests.length > 0 && (
           <div className="text-sm">
-            <p className="mb-1 font-medium">Earlier requests on this purchase</p>
+            <p className="mb-1 font-medium">
+              Earlier requests on this purchase
+            </p>
             <ul className="space-y-1 text-muted-foreground">
               {entry.earlierRequests.map((earlier) => (
                 <li key={earlier.id}>
-                  {formatDate(earlier.requestedAt)} — {earlier.status}: “{earlier.reason}”
-                  {earlier.declineReason && <> (declined: “{earlier.declineReason}”)</>}
+                  {formatDate(earlier.requestedAt)} — {earlier.status}: “
+                  {earlier.reason}”
+                  {earlier.declineReason && (
+                    <> (declined: “{earlier.declineReason}”)</>
+                  )}
                 </li>
               ))}
             </ul>
@@ -356,7 +355,8 @@ function DecisionForm({ refundRequestId }: { refundRequestId: number }) {
   const fetcher = useFetcher<typeof action>();
   const [declining, setDeclining] = useState(false);
   const busy = fetcher.state !== "idle";
-  const errors = fetcher.data && "errors" in fetcher.data ? fetcher.data.errors : null;
+  const errors =
+    fetcher.data && "errors" in fetcher.data ? fetcher.data.errors : null;
 
   useEffect(() => {
     if (fetcher.state === "idle" && fetcher.data && "message" in fetcher.data) {
@@ -369,7 +369,13 @@ function DecisionForm({ refundRequestId }: { refundRequestId: number }) {
       <div className="flex gap-2">
         <fetcher.Form method="post">
           <input type="hidden" name="refundRequestId" value={refundRequestId} />
-          <Button type="submit" name="intent" value="approve" size="sm" disabled={busy}>
+          <Button
+            type="submit"
+            name="intent"
+            value="approve"
+            size="sm"
+            disabled={busy}
+          >
             Approve
           </Button>
         </fetcher.Form>
@@ -388,7 +394,10 @@ function DecisionForm({ refundRequestId }: { refundRequestId: number }) {
   return (
     <fetcher.Form method="post" className="space-y-2">
       <input type="hidden" name="refundRequestId" value={refundRequestId} />
-      <label className="block text-sm font-medium" htmlFor={`decline-${refundRequestId}`}>
+      <label
+        className="block text-sm font-medium"
+        htmlFor={`decline-${refundRequestId}`}
+      >
         Reason for declining (the learner will see this)
       </label>
       <Textarea
@@ -433,14 +442,17 @@ function RefundsSection({ refunds }: { refunds: OutstandingRefund[] }) {
     <section>
       <h2 className="mb-1 text-xl font-semibold">Refunds to send</h2>
       <p className="mb-4 text-sm text-muted-foreground">
-        Pending and Failed Refunds. Mark each Issued once the money has gone out.
+        Pending and Failed Refunds. Mark each Issued once the money has gone
+        out.
       </p>
 
       {refunds.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center">
             <ReceiptText className="mx-auto mb-3 size-8 text-muted-foreground/50" />
-            <p className="text-muted-foreground">No Refunds are waiting to be sent.</p>
+            <p className="text-muted-foreground">
+              No Refunds are waiting to be sent.
+            </p>
           </CardContent>
         </Card>
       ) : (
@@ -473,7 +485,9 @@ function RefundCard({ refund }: { refund: OutstandingRefund }) {
           <p className="font-semibold">{formatPrice(refund.amountRefunded)}</p>
           <p className={failed ? "text-destructive" : "text-muted-foreground"}>
             {failed ? "Failed" : "Pending"}
-            {refund.refundStateChangedAt && <> since {formatDate(refund.refundStateChangedAt)}</>}
+            {refund.refundStateChangedAt && (
+              <> since {formatDate(refund.refundStateChangedAt)}</>
+            )}
           </p>
         </div>
         <RefundStateForm refundId={refund.id} failed={failed} />
@@ -482,7 +496,13 @@ function RefundCard({ refund }: { refund: OutstandingRefund }) {
   );
 }
 
-function RefundStateForm({ refundId, failed }: { refundId: number; failed: boolean }) {
+function RefundStateForm({
+  refundId,
+  failed,
+}: {
+  refundId: number;
+  failed: boolean;
+}) {
   const fetcher = useFetcher<typeof action>();
   const busy = fetcher.state !== "idle";
 
@@ -495,7 +515,13 @@ function RefundStateForm({ refundId, failed }: { refundId: number; failed: boole
   return (
     <fetcher.Form method="post" className="flex gap-2">
       <input type="hidden" name="refundId" value={refundId} />
-      <Button type="submit" name="intent" value="mark_issued" size="sm" disabled={busy}>
+      <Button
+        type="submit"
+        name="intent"
+        value="mark_issued"
+        size="sm"
+        disabled={busy}
+      >
         {failed ? "Retried — mark Issued" : "Mark Issued"}
       </Button>
       {!failed && (
@@ -523,7 +549,8 @@ function DiscretionaryRefundSection({
 }) {
   const fetcher = useFetcher<typeof action>();
   const busy = fetcher.state !== "idle";
-  const errors = fetcher.data && "errors" in fetcher.data ? fetcher.data.errors : null;
+  const errors =
+    fetcher.data && "errors" in fetcher.data ? fetcher.data.errors : null;
 
   useEffect(() => {
     if (fetcher.state === "idle" && fetcher.data && "message" in fetcher.data) {
@@ -533,7 +560,9 @@ function DiscretionaryRefundSection({
 
   return (
     <section>
-      <h2 className="mb-1 text-xl font-semibold">Raise a Discretionary Refund Request</h2>
+      <h2 className="mb-1 text-xl font-semibold">
+        Raise a Discretionary Refund Request
+      </h2>
       <p className="mb-4 text-sm text-muted-foreground">
         For genuinely exceptional cases. It sets aside the refund window, watch
         and completion limits and the one-Refund-per-course rule, but never a
@@ -548,7 +577,10 @@ function DiscretionaryRefundSection({
           ) : (
             <fetcher.Form method="post" className="space-y-3">
               <div>
-                <label className="mb-1 block text-sm font-medium" htmlFor="discretionary-purchase">
+                <label
+                  className="mb-1 block text-sm font-medium"
+                  htmlFor="discretionary-purchase"
+                >
                   Learner's purchase
                 </label>
                 <select
@@ -560,14 +592,18 @@ function DiscretionaryRefundSection({
                   {purchases.map((purchase) => (
                     <option key={purchase.id} value={purchase.id}>
                       {purchase.learner.name} ({purchase.learner.email}) —{" "}
-                      {purchase.course.title} — {formatPrice(purchase.amountPaid)} on{" "}
+                      {purchase.course.title} —{" "}
+                      {formatPrice(purchase.amountPaid)} on{" "}
                       {formatDate(purchase.purchasedAt)}
                     </option>
                   ))}
                 </select>
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium" htmlFor="discretionary-reason">
+                <label
+                  className="mb-1 block text-sm font-medium"
+                  htmlFor="discretionary-reason"
+                >
                   Your reason (the reviewing Admin will see this)
                 </label>
                 <Textarea

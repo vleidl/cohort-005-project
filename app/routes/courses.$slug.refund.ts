@@ -6,11 +6,11 @@ import { db } from "~/db";
 import { courses, users } from "~/db/schema";
 import { eq } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
+import { findLatestPurchase, raiseRefundRequest } from "~/lib/refunds.server";
 import {
-  describeRefundIneligibility,
-  findLatestPurchase,
-  raiseRefundRequest,
-} from "~/lib/refunds.server";
+  REFUND_INELIGIBILITY,
+  throwRefusal,
+} from "~/lib/refund-refusals.server";
 
 const refundParamsSchema = z.object({
   slug: z.string().min(1),
@@ -63,11 +63,7 @@ export async function action({ params, request }: Route.ActionArgs) {
 
   const outcome = raiseRefundRequest(db, learner, purchase, parsed.data.reason);
 
-  if (!outcome.ok) {
-    throw data(describeRefundIneligibility(outcome.rule), {
-      status: outcome.rule === "request_already_open" ? 409 : 403,
-    });
-  }
+  if (!outcome.ok) throwRefusal(REFUND_INELIGIBILITY, outcome.rule);
 
   return redirect("/settings");
 }
