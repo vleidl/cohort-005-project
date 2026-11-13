@@ -17,9 +17,11 @@ import {
   describeLearnerRefundOutcome,
   listOpenRefundRequests,
   listOutstandingRefunds,
+  listPurchasesForDiscretionaryRefund,
   listRefundRequestsForLearner,
   markRefundFailed,
   markRefundIssued,
+  raiseDiscretionaryRefundRequest,
   raiseRefundRequest,
   type RefundIneligibility,
 } from "./refunds.server";
@@ -610,6 +612,162 @@ describe("the refund queue", () => {
     ]);
   });
 });
+
+describe("Discretionary Refund Requests", () => {
+  // One Refund per course stops the normal route after a repurchase, but an
+  // Admin can still set the rules aside for a genuinely exceptional case.
+  it("lets an Admin raise one where Refund Eligibility says no", () => {
+    approveRefundRequest(
+      db,
+      admin,
+      raise(base.user, buyCourse(db, base.user.id, base.course.id))
+    );
+    const repurchase = buyCourse(db, base.user.id, base.course.id);
+    expectBlockedBy(base.user, repurchase, "already_refunded");
+
+    const outcome = raiseDiscretionaryRefundRequest(
+      db,
+      admin,
+      base.user,
+      repurchase,
+      "Charged twice by mistake."
+    );
+
+    expect(outcome.ok).toBe(true);
+    const [entry] = listOpenRefundRequests(db);
+    expect(entry).toMatchObject({
+      purchase: { id: repurchase.id },
+      reason: "Charged twice by mistake.",
+      discretionary: true,
+      raisedBy: { id: admin.id, name: "Admin" },
+    });
+  });
+
+  // A claimed seat belongs to the team member who claimed it, and one
+  // purchase never has two undecided requests — discretion doesn't change that.
+  it("never overrides a claimed team seat", () => {
+    const { purchase, coupon } = teamPurchaseWithCoupon(base.user.id);
+    const member = addUser(db, "Team Member");
+    db.update(schema.coupons)
+      .set({ redeemedByUserId: member.id, redeemedAt: new Date().toISOString() })
+      .where(eq(schema.coupons.id, coupon.id))
+      .run();
+
+    expect(
+      raiseDiscretionaryRefundRequest(db, admin, base.user, purchase, "Please.")
+    ).toEqual({ ok: false, rule: "claimed_team_seat" });
+  });
+
+  it("never overrides an existing Open Refund Request", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    raise(base.user, purchase);
+
+    expect(
+      raiseDiscretionaryRefundRequest(db, admin, base.user, purchase, "Please.")
+    ).toEqual({ ok: false, rule: "request_already_open" });
+    expect(listOpenRefundRequests(db)).toHaveLength(1);
+  });
+
+  // One person can't send money out against the rules alone.
+  it("refuses the raising Admin deciding it, and lets a different Admin", () => {
+    const otherAdmin = addUser(db, "Other Admin", schema.UserRole.Admin);
+    const request = raiseDiscretionary(
+      buyCourse(db, base.user.id, base.course.id)
+    );
+
+    expect(approveRefundRequest(db, admin, request)).toEqual({
+      ok: false,
+      refusal: "own_discretionary_request",
+    });
+    expect(declineRefundRequest(db, admin, request, "No.")).toEqual({
+      ok: false,
+      refusal: "own_discretionary_request",
+    });
+
+    expect(approveRefundRequest(db, otherAdmin, request).ok).toBe(true);
+  });
+
+  // With no second Admin, nobody can decide it — say so rather than leave
+  // the raiser wondering why it's stuck.
+  it("is blocked and flagged while its raiser is the only Admin", () => {
+    const request = raiseDiscretionary(
+      buyCourse(db, base.user.id, base.course.id)
+    );
+
+    expect(approveRefundRequest(db, admin, request)).toEqual({
+      ok: false,
+      refusal: "sole_admin_discretionary_request",
+    });
+    expect(declineRefundRequest(db, admin, request, "No.")).toEqual({
+      ok: false,
+      refusal: "sole_admin_discretionary_request",
+    });
+    expect(listOpenRefundRequests(db)).toEqual([
+      expect.objectContaining({ id: request.id, soleAdminWarning: true }),
+    ]);
+
+    const secondAdmin = addUser(db, "Second Admin", schema.UserRole.Admin);
+    expect(listOpenRefundRequests(db)).toEqual([
+      expect.objectContaining({ id: request.id, soleAdminWarning: false }),
+    ]);
+    expect(declineRefundRequest(db, secondAdmin, request, "No.").ok).toBe(true);
+  });
+
+  // The Admin picks the learner's purchase to raise one for.
+  it("offers every purchase to choose from, newest first", () => {
+    const older = buyCourse(db, base.user.id, base.course.id, {
+      amountPaid: 4900,
+      purchasedAt: daysAgo(40),
+    });
+    const second = addUser(db, "Second Learner");
+    const newer = buyCourse(db, second.id, base.course.id, {
+      amountPaid: 7900,
+      purchasedAt: daysAgo(2),
+    });
+
+    expect(listPurchasesForDiscretionaryRefund(db)).toEqual([
+      {
+        id: newer.id,
+        amountPaid: 7900,
+        purchasedAt: newer.createdAt,
+        learner: { id: second.id, name: "Second Learner", email: second.email },
+        course: { id: base.course.id, title: "Test Course" },
+      },
+      {
+        id: older.id,
+        amountPaid: 4900,
+        purchasedAt: older.createdAt,
+        learner: { id: base.user.id, name: "Test User", email: base.user.email },
+        course: { id: base.course.id, title: "Test Course" },
+      },
+    ]);
+  });
+
+  it("doesn't flag ordinary Refund Requests", () => {
+    raise(base.user, buyCourse(db, base.user.id, base.course.id));
+
+    expect(listOpenRefundRequests(db)).toEqual([
+      expect.objectContaining({
+        discretionary: false,
+        raisedBy: null,
+        soleAdminWarning: false,
+      }),
+    ]);
+  });
+});
+
+/** An Admin raises a Discretionary Refund Request the scenario expects to succeed. */
+function raiseDiscretionary(purchase: typeof schema.purchases.$inferSelect) {
+  const outcome = raiseDiscretionaryRefundRequest(
+    db,
+    admin,
+    { id: purchase.userId },
+    purchase,
+    "Exceptional circumstances."
+  );
+  if (!outcome.ok) throw new Error(`expected a request, got ${outcome.rule}`);
+  return outcome.refundRequest;
+}
 
 describe("a learner's Refund Requests in Settings", () => {
   // Decided requests stay listed, so the learner can follow the outcome.

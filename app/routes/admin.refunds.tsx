@@ -10,16 +10,22 @@ import {
   approveRefundRequest,
   declineRefundRequest,
   describeDecisionRefusal,
-  describeRefundStateRefusal,
+  describeDiscretionaryRefundIneligibility,
   listOpenRefundRequests,
+  listPurchasesForDiscretionaryRefund,
+  raiseDiscretionaryRefundRequest,
+  describeRefundStateRefusal,
   listOutstandingRefunds,
   markRefundFailed,
   markRefundIssued,
   type DecisionRefusal,
   type OutstandingRefund,
+  type PurchaseForDiscretionaryRefund,
   type RefundQueueEntry,
   type RefundStateRefusal,
 } from "~/lib/refunds.server";
+import { eq } from "drizzle-orm";
+import { purchases } from "~/db/schema";
 import { parseFormData } from "~/lib/validation";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
@@ -50,6 +56,15 @@ const refundActionSchema = z.discriminatedUnion("intent", [
       .max(1000, "Please keep the reason under 1000 characters."),
   }),
   z.object({
+    intent: z.literal("raise_discretionary"),
+    purchaseId: z.coerce.number().int(),
+    reason: z
+      .string()
+      .trim()
+      .min(1, "Explain why this purchase should be refunded.")
+      .max(1000, "Please keep the reason under 1000 characters."),
+  }),
+  z.object({
     intent: z.literal("mark_issued"),
     refundId: z.coerce.number().int(),
   }),
@@ -72,6 +87,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   return {
     adminId: admin.id,
     openRefundRequests: listOpenRefundRequests(db),
+    purchasesForDiscretionaryRefund: listPurchasesForDiscretionaryRefund(db),
     outstandingRefunds: listOutstandingRefunds(db),
   };
 }
@@ -104,6 +120,31 @@ export async function action({ request }: Route.ActionArgs) {
       if (!outcome.ok) throwRefusal(outcome.refusal);
       return { message: "Refund Request declined. The learner has been emailed." };
     }
+    case "raise_discretionary": {
+      const purchase = db
+        .select()
+        .from(purchases)
+        .where(eq(purchases.id, form.purchaseId))
+        .get();
+      if (!purchase) throw data("That purchase doesn't exist.", { status: 404 });
+
+      const outcome = raiseDiscretionaryRefundRequest(
+        db,
+        admin,
+        { id: purchase.userId },
+        purchase,
+        form.reason
+      );
+      if (!outcome.ok) {
+        throw data(describeDiscretionaryRefundIneligibility(outcome.rule), {
+          status: 422,
+        });
+      }
+      return {
+        message:
+          "Discretionary Refund Request raised. A different Admin has to decide it.",
+      };
+    }
     case "mark_issued": {
       const outcome = markRefundIssued(db, admin, { id: form.refundId });
       if (!outcome.ok) throwRefundStateRefusal(outcome.refusal);
@@ -123,6 +164,8 @@ function throwRefusal(refusal: DecisionRefusal): never {
     already_decided: 409,
     own_request: 403,
     decline_reason_missing: 400,
+    own_discretionary_request: 403,
+    sole_admin_discretionary_request: 403,
   } satisfies Record<DecisionRefusal, number>;
 
   throw data(describeDecisionRefusal(refusal), { status: status[refusal] });
@@ -139,7 +182,12 @@ function throwRefundStateRefusal(refusal: RefundStateRefusal): never {
 }
 
 export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
-  const { openRefundRequests, outstandingRefunds } = loaderData;
+  const {
+    adminId,
+    openRefundRequests,
+    outstandingRefunds,
+    purchasesForDiscretionaryRefund,
+  } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -159,9 +207,10 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
       </div>
 
       <div className="space-y-10">
-        <RefundQueueSection entries={openRefundRequests} />
+        <RefundQueueSection entries={openRefundRequests} adminId={adminId} />
         <RefundsSection refunds={outstandingRefunds} />
-        {/* Further sections (Discretionary Refund Requests) go here. */}
+        <DiscretionaryRefundSection purchases={purchasesForDiscretionaryRefund} />
+        {/* Further sections go here. */}
       </div>
     </div>
   );
@@ -169,7 +218,13 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
 
 // ─── Section: Open Refund Requests ───
 
-function RefundQueueSection({ entries }: { entries: RefundQueueEntry[] }) {
+function RefundQueueSection({
+  entries,
+  adminId,
+}: {
+  entries: RefundQueueEntry[];
+  adminId: number;
+}) {
   return (
     <section>
       <h2 className="mb-1 text-xl font-semibold">Open Refund Requests</h2>
@@ -188,7 +243,7 @@ function RefundQueueSection({ entries }: { entries: RefundQueueEntry[] }) {
       ) : (
         <div className="space-y-4">
           {entries.map((entry) => (
-            <RefundQueueCard key={entry.id} entry={entry} />
+            <RefundQueueCard key={entry.id} entry={entry} adminId={adminId} />
           ))}
         </div>
       )}
@@ -196,7 +251,15 @@ function RefundQueueSection({ entries }: { entries: RefundQueueEntry[] }) {
   );
 }
 
-function RefundQueueCard({ entry }: { entry: RefundQueueEntry }) {
+function RefundQueueCard({
+  entry,
+  adminId,
+}: {
+  entry: RefundQueueEntry;
+  adminId: number;
+}) {
+  const raisedByMe = entry.raisedBy?.id === adminId;
+
   return (
     <Card>
       <CardContent className="space-y-4 p-5">
@@ -207,7 +270,18 @@ function RefundQueueCard({ entry }: { entry: RefundQueueEntry }) {
               <span className="text-sm font-normal text-muted-foreground">
                 {entry.learner.email}
               </span>
+              {entry.discretionary && (
+                <span className="ml-2 inline-flex items-center rounded-full bg-purple-100 px-2.5 py-0.5 text-xs font-medium text-purple-800 dark:bg-purple-900/30 dark:text-purple-400">
+                  Discretionary
+                </span>
+              )}
             </p>
+            {entry.discretionary && entry.raisedBy && (
+              <p className="text-sm text-muted-foreground">
+                Raised by {raisedByMe ? "you" : entry.raisedBy.name}. Refund
+                Eligibility was set aside, so a different Admin decides it.
+              </p>
+            )}
             <Link
               to={`/courses/${entry.course.slug}`}
               className="text-sm text-muted-foreground hover:text-foreground"
@@ -255,7 +329,22 @@ function RefundQueueCard({ entry }: { entry: RefundQueueEntry }) {
           </div>
         )}
 
-        <DecisionForm refundRequestId={entry.id} />
+        {raisedByMe && entry.soleAdminWarning ? (
+          <p
+            role="alert"
+            className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200"
+          >
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            You raised this Discretionary Refund Request and you are the only
+            Admin. It can't be decided until a second Admin exists.
+          </p>
+        ) : raisedByMe ? (
+          <p className="text-sm text-muted-foreground">
+            You raised this request, so another Admin has to decide it.
+          </p>
+        ) : (
+          <DecisionForm refundRequestId={entry.id} />
+        )}
       </CardContent>
     </Card>
   );
@@ -420,6 +509,89 @@ function RefundStateForm({ refundId, failed }: { refundId: number; failed: boole
         </Button>
       )}
     </fetcher.Form>
+  );
+}
+
+// ─── Section: Discretionary Refund Requests ───
+
+function DiscretionaryRefundSection({
+  purchases,
+}: {
+  purchases: PurchaseForDiscretionaryRefund[];
+}) {
+  const fetcher = useFetcher<typeof action>();
+  const busy = fetcher.state !== "idle";
+  const errors = fetcher.data && "errors" in fetcher.data ? fetcher.data.errors : null;
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data && "message" in fetcher.data) {
+      toast.success(fetcher.data.message);
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  return (
+    <section>
+      <h2 className="mb-1 text-xl font-semibold">Raise a Discretionary Refund Request</h2>
+      <p className="mb-4 text-sm text-muted-foreground">
+        For genuinely exceptional cases. It sets aside the refund window, watch
+        and completion limits and the one-Refund-per-course rule, but never a
+        claimed team seat or an Open Refund Request. A different Admin must
+        decide it.
+      </p>
+
+      <Card>
+        <CardContent className="p-5">
+          {purchases.length === 0 ? (
+            <p className="text-muted-foreground">There are no purchases yet.</p>
+          ) : (
+            <fetcher.Form method="post" className="space-y-3">
+              <div>
+                <label className="mb-1 block text-sm font-medium" htmlFor="discretionary-purchase">
+                  Learner's purchase
+                </label>
+                <select
+                  id="discretionary-purchase"
+                  name="purchaseId"
+                  required
+                  className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+                >
+                  {purchases.map((purchase) => (
+                    <option key={purchase.id} value={purchase.id}>
+                      {purchase.learner.name} ({purchase.learner.email}) —{" "}
+                      {purchase.course.title} — {formatPrice(purchase.amountPaid)} on{" "}
+                      {formatDate(purchase.purchasedAt)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium" htmlFor="discretionary-reason">
+                  Your reason (the reviewing Admin will see this)
+                </label>
+                <Textarea
+                  id="discretionary-reason"
+                  name="reason"
+                  required
+                  aria-invalid={errors?.reason ? true : undefined}
+                />
+                {errors?.reason && (
+                  <p className="text-sm text-destructive">{errors.reason}</p>
+                )}
+              </div>
+              <Button
+                type="submit"
+                name="intent"
+                value="raise_discretionary"
+                size="sm"
+                disabled={busy}
+              >
+                Raise Discretionary Refund Request
+              </Button>
+            </fetcher.Form>
+          )}
+        </CardContent>
+      </Card>
+    </section>
   );
 }
 
