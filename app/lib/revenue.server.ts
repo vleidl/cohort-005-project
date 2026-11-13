@@ -64,7 +64,11 @@ export function revenueAfterIssuedRefunds() {
   return sql<number>`(${purchases.amountPaid} - coalesce((select sum(${refunds.amountRefunded}) from ${refunds} where ${refunds.purchaseId} = ${purchases.id} and ${refunds.status} = ${RefundStatus.Approved} and ${refunds.refundState} = ${RefundMoneyState.Issued}), 0))`;
 }
 
-/** Refunds per course, for sales in the range. */
+/**
+ * Refunds per course, for sales in the range. Counts every Approved Refund
+ * Request, whatever its money state: the count says how many learners were
+ * let go, not how many have been paid back yet.
+ */
 function refundCountsByCourse(
   db: Db,
   instructorId: number | null,
