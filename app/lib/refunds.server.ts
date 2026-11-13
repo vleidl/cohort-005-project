@@ -1,4 +1,14 @@
-import { and, asc, desc, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  sql,
+} from "drizzle-orm";
 import type { Db } from "~/db";
 import {
   courses,
@@ -360,11 +370,30 @@ function decideIfOpen(
 /**
  * Everything approval does beyond recording the decision. Runs inside the
  * approval transaction, after the guarded update has won. Add further
- * approval effects (e.g. voiding a team Purchase's unclaimed Coupons) here;
- * `now` is the approval time, for anything that needs stamping.
+ * approval effects here; `now` is the approval time, for anything that
+ * needs stamping.
  */
 function applyApproval(tx: Db, purchase: Purchase, now: Date) {
   endEnrollment(tx, purchase);
+  voidUnclaimedCoupons(tx, purchase, now);
+}
+
+/**
+ * Seats that were paid back can't still let someone in. Claimed seats are
+ * never voided: Refund Eligibility refuses a team Purchase once any seat is
+ * claimed, so by approval every Coupon on it is unclaimed.
+ */
+function voidUnclaimedCoupons(tx: Db, purchase: Purchase, now: Date) {
+  tx.update(coupons)
+    .set({ voidedAt: now.toISOString() })
+    .where(
+      and(
+        eq(coupons.purchaseId, purchase.id),
+        isNull(coupons.redeemedAt),
+        isNull(coupons.voidedAt)
+      )
+    )
+    .run();
 }
 
 /**
