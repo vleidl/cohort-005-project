@@ -39,6 +39,11 @@ import {
 import { splitRevenue, type AnalyticsRange } from "~/lib/analytics";
 import { getDiscountForCountry } from "~/lib/ppp";
 import {
+  getCourseRevenue,
+  getRevenueSummary,
+  revenueAfterIssuedRefunds,
+} from "~/lib/revenue.server";
+import {
   ANALYTICS_RANGES,
   PLATFORM_FEE_PERCENT,
   formatBucket,
@@ -98,13 +103,6 @@ function parseId(value: string | null): number | null {
   const id = Number(value);
   return value !== null && Number.isInteger(id) && id > 0 ? id : null;
 }
-
-type RevenueSummary = {
-  grossCents: number;
-  feeCents: number;
-  netCents: number;
-  purchaseCount: number;
-};
 
 type RevenuePoint = {
   bucket: string;
@@ -440,7 +438,7 @@ function getRevenueOverTime(
   })`;
 
   const rows = db
-    .select({ bucket: bucketExpr, gross: sum(purchases.amountPaid) })
+    .select({ bucket: bucketExpr, gross: sum(revenueAfterIssuedRefunds()) })
     .from(purchases)
     .innerJoin(courses, eq(purchases.courseId, courses.id))
     .where(purchaseScope(instructorId, range))
@@ -885,46 +883,12 @@ export async function loader({ request, url }: Route.LoaderArgs) {
     older: (questionRow?.total ?? 0) - questionsInRange,
   };
 
-  // Gross revenue, the platform's fee and the instructor's net for the range.
-  const summaryRow = db
-    .select({
-      gross: sum(purchases.amountPaid),
-      purchaseCount: count(purchases.id),
-    })
-    .from(purchases)
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(purchaseScope(instructorId, range))
-    .get();
-
-  // sum() returns null over an empty set, and a string when SQLite has rows.
-  const summary: RevenueSummary = {
-    ...splitRevenue(Number(summaryRow?.gross ?? 0)),
-    purchaseCount: summaryRow?.purchaseCount ?? 0,
-  };
-
-  // Revenue broken down by course, biggest earner first. Courses with no sales
-  // in the range are absent rather than listed at zero.
-  const courseRevenueRows = db
-    .select({
-      courseId: courses.id,
-      title: courses.title,
-      gross: sum(purchases.amountPaid),
-      purchaseCount: count(purchases.id),
-    })
-    .from(purchases)
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(purchaseScope(instructorId, range))
-    .groupBy(courses.id)
-    .all();
-
-  const courseRevenue = courseRevenueRows
-    .map((row) => ({
-      courseId: row.courseId,
-      title: row.title,
-      ...splitRevenue(Number(row.gross ?? 0)),
-      purchaseCount: row.purchaseCount,
-    }))
-    .sort((a, b) => b.grossCents - a.grossCents);
+  // Gross revenue, the platform's fee and the instructor's net for the range,
+  // after Issued Refunds. Then the same per course, biggest earner first, with
+  // each course's refund count. Courses with no sales in the range are absent
+  // rather than listed at zero.
+  const summary = getRevenueSummary(db, instructorId, range);
+  const courseRevenue = getCourseRevenue(db, instructorId, range);
 
   // How many people paid, and how many are learning. Deliberately two numbers:
   // one team purchase is a single buyer covering several seats, and someone who
@@ -1637,7 +1601,7 @@ export default function InstructorAnalytics({
                 amountCents={summary.grossCents}
                 hint={`What students paid, across ${summary.purchaseCount} ${
                   summary.purchaseCount === 1 ? "purchase" : "purchases"
-                }.`}
+                }, less refunds sent back to them.`}
               />
               <MoneyCard
                 label={`Platform fee (${PLATFORM_FEE_PERCENT}%)`}
@@ -1848,6 +1812,7 @@ export default function InstructorAnalytics({
                       <tr className="border-b text-left text-muted-foreground">
                         <th className="pb-2 font-medium">Course</th>
                         <th className="pb-2 text-right font-medium">Sales</th>
+                        <th className="pb-2 text-right font-medium">Refunds</th>
                         <th className="pb-2 text-right font-medium">Gross</th>
                         <th className="pb-2 text-right font-medium">
                           Fee ({PLATFORM_FEE_PERCENT}%)
@@ -1861,6 +1826,9 @@ export default function InstructorAnalytics({
                           <td className="py-3 font-medium">{course.title}</td>
                           <td className="py-3 text-right tabular-nums">
                             {course.purchaseCount}
+                          </td>
+                          <td className="py-3 text-right tabular-nums text-muted-foreground">
+                            {course.refundCount}
                           </td>
                           <td className="py-3 text-right tabular-nums">
                             {formatMoney(course.grossCents)}
