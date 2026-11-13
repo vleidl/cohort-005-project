@@ -205,3 +205,19 @@ export async function requireInstructorOrAdmin(db: Db, request: Request) {
 
   return { userId, user, isAdmin: user.role === UserRole.Admin };
 }
+
+/**
+ * Throws 401 when signed out, 403 unless the user is an Admin. Returns the
+ * Admin. The same rule the other admin pages apply inline; call it from both
+ * the loader and the action.
+ */
+export async function requireAdmin(db: Db, request: Request) {
+  const userId = await requireUserId(request);
+  const user = getUserById(db, userId);
+
+  if (!user || user.role !== UserRole.Admin) {
+    throw data("Only admins can access this page.", { status: 403 });
+  }
+
+  return user;
+}
