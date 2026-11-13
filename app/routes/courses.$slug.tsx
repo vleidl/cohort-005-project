@@ -50,6 +50,10 @@ import {
 } from "~/lib/ppp";
 import { parseFormData } from "~/lib/validation";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
+import {
+  EMPTY_RATING_SUMMARY,
+  getCourseRatingSummaries,
+} from "~/lib/ratings.server";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
 import {
   checkRefundEligibility,
@@ -294,13 +298,6 @@ function getNextIncompleteLesson(userId: number, courseId: number) {
   return null;
 }
 
-type CourseRatingSummary = {
-  average: number | null;
-  count: number;
-};
-
-const EMPTY_SUMMARY: CourseRatingSummary = { average: null, count: 0 };
-
 function findRating(userId: number, courseId: number) {
   return db
     .select()
@@ -309,26 +306,6 @@ function findRating(userId: number, courseId: number) {
       and(eq(courseRatings.userId, userId), eq(courseRatings.courseId, courseId))
     )
     .get();
-}
-
-function getCourseRatingSummary(courseId: number): CourseRatingSummary {
-  const result = db
-    .select({
-      average: sql<number | null>`avg(${courseRatings.rating})`,
-      count: sql<number>`count(*)`,
-    })
-    .from(courseRatings)
-    .where(eq(courseRatings.courseId, courseId))
-    .get();
-
-  if (!result || result.count === 0 || result.average === null) {
-    return EMPTY_SUMMARY;
-  }
-
-  return {
-    average: Math.round(result.average * 10) / 10,
-    count: result.count,
-  };
 }
 
 function rateCourse(userId: number, courseId: number, rating: number) {
@@ -452,7 +429,9 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   // Render sales copy from Markdown to HTML server-side
   const salesCopyHtml = await renderMarkdown(courseWithDetails.salesCopy);
 
-  const ratingSummary = getCourseRatingSummary(course.id);
+  const ratingSummary =
+    getCourseRatingSummaries(db, [course.id]).get(course.id) ??
+    EMPTY_RATING_SUMMARY;
   const userRating = currentUserId
     ? (findRating(currentUserId, course.id)?.rating ?? null)
     : null;
