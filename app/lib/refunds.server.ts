@@ -86,7 +86,11 @@ export function describeRefundIneligibility(rule: RefundIneligibility) {
 }
 
 /** The learner's most recent purchase of a course, if any. */
-export function findLatestPurchase(db: Db, learnerId: number, courseId: number) {
+export function findLatestPurchase(
+  db: Db,
+  learnerId: number,
+  courseId: number
+) {
   return db
     .select()
     .from(purchases)
@@ -154,6 +158,62 @@ export function checkRefundEligibility(
   }
 
   return { eligible: true, amount: purchase.amountPaid, lastDayInWindow };
+}
+
+export type RefundOffer =
+  | { available: true; amount: number; lastDayInWindow: string }
+  | { available: false; rule: RefundIneligibility };
+
+/**
+ * What the course page offers the learner on their latest purchase: a
+ * refund, the rule that stops one, or nothing (null) when they have no
+ * purchase to refund. Asks the same Refund Eligibility check as
+ * `raiseRefundRequest`, so the page never offers a refund the action would
+ * refuse.
+ */
+export function getRefundOffer(
+  db: Db,
+  learner: Learner,
+  courseId: number,
+  now: Date = new Date()
+): RefundOffer | null {
+  const purchase = findLatestPurchase(db, learner.id, courseId);
+  if (!purchase) return null;
+
+  // A team buyer isn't enrolled — the seats are for their team — but can
+  // still refund a team Purchase nobody has claimed a seat from. Anyone
+  // else who isn't enrolled has nothing left to refund.
+  if (
+    !isEnrolled(db, learner.id, courseId) &&
+    !isTeamPurchase(db, purchase.id)
+  ) {
+    return null;
+  }
+
+  const eligibility = checkRefundEligibility(db, learner, purchase, now);
+  if (!eligibility.eligible) {
+    return { available: false, rule: eligibility.rule };
+  }
+
+  return {
+    available: true,
+    amount: eligibility.amount,
+    lastDayInWindow: eligibility.lastDayInWindow,
+  };
+}
+
+/**
+ * Whether buying the course again could be refunded the normal way. False
+ * once the learner has had a Refund for the course: at most one Refund per
+ * course, so a repurchase can only be refunded through a Discretionary
+ * Refund Request. The course page warns them before they buy.
+ */
+export function canRefundRepurchase(
+  db: Db,
+  learner: Learner,
+  courseId: number
+) {
+  return !hasApprovedRefundForCourse(db, learner.id, courseId);
 }
 
 export type RaiseRefundRequestOutcome =
@@ -246,7 +306,11 @@ export function approveRefundRequest(
 
     applyApproval(tx, guarded.purchase, now);
 
-    return { ok: true as const, refundRequest: decided, purchase: guarded.purchase };
+    return {
+      ok: true as const,
+      refundRequest: decided,
+      purchase: guarded.purchase,
+    };
   });
 
   if (!outcome.ok) return outcome;
@@ -284,7 +348,11 @@ export function declineRefundRequest(
     });
     if (!decided) return refuse("already_decided");
 
-    return { ok: true as const, refundRequest: decided, purchase: guarded.purchase };
+    return {
+      ok: true as const,
+      refundRequest: decided,
+      purchase: guarded.purchase,
+    };
   });
 
   if (!outcome.ok) return outcome;
@@ -349,7 +417,8 @@ function guardDecision(
     .get();
 
   if (!row) return refuse("not_found");
-  if (row.request.status !== RefundStatus.Open) return refuse("already_decided");
+  if (row.request.status !== RefundStatus.Open)
+    return refuse("already_decided");
 
   // No conflict of interest: an Admin can't decide on their own money.
   if (row.purchase.userId === admin.id) return refuse("own_request");
@@ -572,7 +641,8 @@ export type DiscretionaryRefundIneligibility =
   | "purchase_already_refunded";
 
 /** Why a Discretionary Refund Request couldn't be raised. */
-export type DiscretionaryRefusal = DiscretionaryRefundIneligibility | "not_admin";
+export type DiscretionaryRefusal =
+  DiscretionaryRefundIneligibility | "not_admin";
 
 /** What the Admin is told when a rule stops a Discretionary Refund Request. */
 export function describeDiscretionaryRefundIneligibility(
@@ -702,7 +772,8 @@ function checkDiscretionaryRules(
 ): DiscretionaryRefundIneligibility | null {
   if (purchase.userId !== learner.id) return "not_purchaser";
   if (hasOpenRefundRequest(db, purchase.id)) return "request_already_open";
-  if (hasApprovedRefundRequest(db, purchase.id)) return "purchase_already_refunded";
+  if (hasApprovedRefundRequest(db, purchase.id))
+    return "purchase_already_refunded";
   if (hasClaimedSeat(db, purchase.id)) return "claimed_team_seat";
   return null;
 }
@@ -795,10 +866,7 @@ type RefundRef = { id: number };
 
 /** Why a change to a Refund's state was refused. */
 export type RefundStateRefusal =
-  | "not_admin"
-  | "no_refund"
-  | "already_issued"
-  | "already_failed";
+  "not_admin" | "no_refund" | "already_issued" | "already_failed";
 
 export type RefundStateOutcome =
   | { ok: true; refund: RefundRequestRow }
@@ -1125,6 +1193,24 @@ function hasUnrefundedPurchaseOfCourse(
         )
       )
     )
+    .get();
+}
+
+function isEnrolled(db: Db, learnerId: number, courseId: number) {
+  return !!db
+    .select({ id: enrollments.id })
+    .from(enrollments)
+    .where(
+      and(eq(enrollments.userId, learnerId), eq(enrollments.courseId, courseId))
+    )
+    .get();
+}
+
+function isTeamPurchase(db: Db, purchaseId: number) {
+  return !!db
+    .select({ id: coupons.id })
+    .from(coupons)
+    .where(eq(coupons.purchaseId, purchaseId))
     .get();
 }
 
