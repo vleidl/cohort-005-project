@@ -37,6 +37,15 @@ export enum RefundStatus {
   Declined = "declined",
 }
 
+// The money side of an Approved Refund Request. Separate from RefundStatus,
+// which is the decision: a Failed Refund leaves its request Approved.
+// Pending → Issued, Pending → Failed, Failed → Issued. Issued is final.
+export enum RefundMoneyState {
+  Pending = "pending",
+  Issued = "issued",
+  Failed = "failed",
+}
+
 export enum TeamMemberRole {
   Admin = "admin",
   Member = "member",
@@ -249,6 +258,19 @@ export const refunds = sqliteTable(
       .$defaultFn(() => new Date().toISOString()),
     resolvedAt: text("resolved_at"),
     resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    // The deciding Admin's reason, shown to the learner. Set only on decline,
+    // and kept apart from the learner's own `reason`.
+    declineReason: text("decline_reason"),
+    // The Refund (the money) for an Approved Refund Request. Null until
+    // approval, then Pending; an Admin moves it to Issued or Failed by hand.
+    refundState: text("refund_state").$type<RefundMoneyState>(),
+    refundStateChangedAt: text("refund_state_changed_at"),
+    // A Discretionary Refund Request, raised by an Admin on the learner's
+    // behalf. It skipped Refund Eligibility, so a different Admin must decide.
+    discretionary: integer("discretionary", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    raisedByUserId: integer("raised_by_user_id").references(() => users.id),
   },
   (table) => [index("refunds_purchase_idx").on(table.purchaseId)]
 );
@@ -288,6 +310,8 @@ export const coupons = sqliteTable("coupons", {
     .references(() => purchases.id),
   redeemedByUserId: integer("redeemed_by_user_id").references(() => users.id),
   redeemedAt: text("redeemed_at"),
+  // Set when the team Purchase is refunded. A voided Coupon can't be redeemed.
+  voidedAt: text("voided_at"),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),

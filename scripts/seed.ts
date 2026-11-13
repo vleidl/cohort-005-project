@@ -2327,6 +2327,7 @@ This course is still in draft while the cluster examples are rewritten against t
         courseId: course2.id,
         code,
         purchaseId: teamPurchase.id,
+        voidedAt: null,
         createdAt: daysAgo(30),
       }))
     )
@@ -2778,6 +2779,13 @@ This course is still in draft while the cluster examples are rewritten against t
       status: RefundStatus.Open,
       reason: "Bought the wrong one, I meant the advanced course.",
       requestedAt: daysAgo(4),
+      // Liam raised it himself, so it went through Refund Eligibility. It is
+      // undecided, so there is no Refund yet and no decline reason.
+      discretionary: false,
+      raisedByUserId: null,
+      declineReason: null,
+      refundState: null,
+      refundStateChangedAt: null,
     })
     .run();
 
@@ -2833,6 +2841,9 @@ This course is still in draft while the cluster examples are rewritten against t
   );
   console.log(
     `  Purchases: ${countRows(schema.purchases)} (${countRows(schema.purchases, gte(schema.purchases.createdAt, sevenDaysAgo))} in the last 7 days), spanning ${historyDays} days`
+  );
+  console.log(
+    `  Refund Requests: ${countRows(schema.refunds)} (${countRows(schema.refunds, eq(schema.refunds.status, RefundStatus.Open))} open)`
   );
   console.log(
     `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`
