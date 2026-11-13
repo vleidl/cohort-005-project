@@ -795,7 +795,7 @@ function getCourseRevenueByCountry(
 }
 
 export async function loader({ request, url }: Route.LoaderArgs) {
-  const { userId, isAdmin } = await requireInstructorOrAdmin(request);
+  const { userId, isAdmin } = await requireInstructorOrAdmin(db, request);
 
   const range = parseAnalyticsRange(url.searchParams.get("range"));
   const tab: AnalyticsTab =

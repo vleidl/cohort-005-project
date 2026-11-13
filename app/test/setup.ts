@@ -4,6 +4,7 @@ import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "path";
 import { fileURLToPath } from "url";
 import * as schema from "~/db/schema";
+import { setCurrentUserId } from "~/lib/session";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -74,4 +75,94 @@ export function seedBaseData(testDb: ReturnType<typeof createTestDb>) {
     .get();
 
   return { user, instructor, category, course };
+}
+
+type TestDb = ReturnType<typeof createTestDb>;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** An ISO timestamp `days` whole days before now. */
+export function daysAgo(days: number) {
+  return new Date(Date.now() - days * DAY_MS).toISOString();
+}
+
+let userCounter = 0;
+
+/** Adds a user with the given role. */
+export function addUser(
+  testDb: TestDb,
+  name: string,
+  role: schema.UserRole = schema.UserRole.Student
+) {
+  userCounter += 1;
+  return testDb
+    .insert(schema.users)
+    .values({ name, email: `user${userCounter}@example.com`, role })
+    .returning()
+    .get();
+}
+
+/** Adds one module holding `count` lessons to a course. Returns the lesson ids. */
+export function addLessons(testDb: TestDb, courseId: number, count: number) {
+  const courseModule = testDb
+    .insert(schema.modules)
+    .values({ courseId, title: "Module", position: 1 })
+    .returning()
+    .get();
+
+  const lessonIds: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const lesson = testDb
+      .insert(schema.lessons)
+      .values({
+        moduleId: courseModule.id,
+        title: `Lesson ${i + 1}`,
+        position: i + 1,
+        videoUrl: "https://example.com/video",
+      })
+      .returning()
+      .get();
+    lessonIds.push(lesson.id);
+  }
+  return lessonIds;
+}
+
+/**
+ * A learner buying a course for themselves: a Purchase plus the Enrollment
+ * the purchase flow creates alongside it.
+ */
+export function buyCourse(
+  testDb: TestDb,
+  userId: number,
+  courseId: number,
+  options: { amountPaid?: number; purchasedAt?: string } = {}
+) {
+  const purchasedAt = options.purchasedAt ?? new Date().toISOString();
+  const purchase = testDb
+    .insert(schema.purchases)
+    .values({
+      userId,
+      courseId,
+      amountPaid: options.amountPaid ?? 4900,
+      createdAt: purchasedAt,
+    })
+    .returning()
+    .get();
+
+  testDb
+    .insert(schema.enrollments)
+    .values({ userId, courseId, enrolledAt: purchasedAt })
+    .run();
+
+  return purchase;
+}
+
+/**
+ * A Request carrying a session for `userId`, for code that resolves the
+ * current user from the request (getAccess and friends).
+ */
+export async function requestAs(userId: number) {
+  const setCookie = await setCurrentUserId(new Request("http://test/"), userId);
+  const cookie = setCookie.split(";")[0];
+  return new Request("http://test/", { headers: { Cookie: cookie } });
 }
