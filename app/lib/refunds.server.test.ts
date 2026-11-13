@@ -1046,7 +1046,7 @@ describe("moving the money for a Refund", () => {
 
     expect(markRefundFailed(db, admin, request)).toMatchObject({
       ok: true,
-      refund: { refundState: schema.RefundMoneyState.Failed },
+      refund: { state: schema.RefundMoneyState.Failed },
     });
     expect(listOutstandingRefunds(db)).toEqual([
       expect.objectContaining({
@@ -1057,7 +1057,7 @@ describe("moving the money for a Refund", () => {
 
     expect(markRefundIssued(db, admin, request)).toMatchObject({
       ok: true,
-      refund: { refundState: schema.RefundMoneyState.Issued },
+      refund: { state: schema.RefundMoneyState.Issued },
     });
     expect(listOutstandingRefunds(db)).toEqual([]);
   });
@@ -1074,11 +1074,13 @@ describe("moving the money for a Refund", () => {
   it("leaves the Refund Request Approved when the Refund fails", () => {
     const request = approvedRefund();
 
-    expect(markRefundFailed(db, admin, request)).toMatchObject({
-      ok: true,
-      refund: { status: schema.RefundStatus.Approved },
-    });
+    expect(markRefundFailed(db, admin, request).ok).toBe(true);
     expect(listOpenRefundRequests(db)).toEqual([]);
+    const [mine] = listRefundRequestsForLearner(db, base.user);
+    expect(mine).toMatchObject({
+      id: request.id,
+      outcome: { status: "refund_pending" },
+    });
   });
 
   it("records when the Refund's state last changed", () => {

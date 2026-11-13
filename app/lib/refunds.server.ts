@@ -862,15 +862,23 @@ function learnerOutcome(request: RefundRequestRow): LearnerRefundOutcome {
 // Refund Request stays Approved throughout — the decision and the money are
 // separate.
 
+/** A Refund has no id of its own: it is known by its Refund Request's id. */
 type RefundRef = { id: number };
+
+/** The money an Approved Refund Request sends back, and where it stands. */
+export type Refund = {
+  refundRequestId: number;
+  amountRefunded: number;
+  state: RefundMoneyState;
+  stateChangedAt: string | null;
+};
 
 /** Why a change to a Refund's state was refused. */
 export type RefundStateRefusal =
   "not_admin" | "no_refund" | "already_issued" | "already_failed";
 
 export type RefundStateOutcome =
-  | { ok: true; refund: RefundRequestRow }
-  | { ok: false; refusal: RefundStateRefusal };
+  { ok: true; refund: Refund } | { ok: false; refusal: RefundStateRefusal };
 
 /** What the Admin is told when a change to a Refund's state is refused. */
 export function describeRefundStateRefusal(refusal: RefundStateRefusal) {
@@ -944,7 +952,17 @@ function moveRefund(
     )
     .returning()
     .get();
-  if (moved) return { ok: true, refund: moved };
+  if (moved && moved.refundState !== null && moved.amountRefunded !== null) {
+    return {
+      ok: true,
+      refund: {
+        refundRequestId: moved.id,
+        amountRefunded: moved.amountRefunded,
+        state: moved.refundState,
+        stateChangedAt: moved.refundStateChangedAt,
+      },
+    };
+  }
 
   const current = db
     .select({ status: refunds.status, refundState: refunds.refundState })
