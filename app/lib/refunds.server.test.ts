@@ -24,6 +24,7 @@ import {
   type RefundIneligibility,
 } from "./refunds.server";
 import { getAccess, requireAdmin } from "./access.server";
+import { redeemCoupon } from "./coupons.server";
 
 let db: ReturnType<typeof createTestDb>;
 let base: ReturnType<typeof seedBaseData>;
@@ -801,6 +802,59 @@ describe("moving the money for a Refund", () => {
         ok: false,
         refusal: "no_refund",
       });
+    }
+  });
+});
+
+describe("refunding a team Purchase", () => {
+  // The team buyer isn't enrolled themselves: the seats are for the team.
+  function buyTeamSeats(buyerId: number, seats: number) {
+    const purchase = db
+      .insert(schema.purchases)
+      .values({
+        userId: buyerId,
+        courseId: base.course.id,
+        amountPaid: 4900 * seats,
+      })
+      .returning()
+      .get();
+    const team = db.insert(schema.teams).values({}).returning().get();
+    const codes = Array.from({ length: seats }, (_, i) => {
+      const code = `SEAT-${purchase.id}-${i}`;
+      db.insert(schema.coupons)
+        .values({
+          teamId: team.id,
+          courseId: base.course.id,
+          code,
+          purchaseId: purchase.id,
+        })
+        .run();
+      return code;
+    });
+    return { purchase, codes };
+  }
+
+  // Seats that were paid back must not still let someone in.
+  it("voids every unclaimed Coupon on approval, so none of its seats can be redeemed", async () => {
+    const buyer = addUser(db, "Team Buyer");
+    const { purchase, codes } = buyTeamSeats(buyer.id, 3);
+
+    expect(approveRefundRequest(db, admin, raise(buyer, purchase)).ok).toBe(
+      true
+    );
+
+    for (const code of codes) {
+      const teamMember = addUser(db, "Team Member");
+      expect(redeemCoupon(db, code, teamMember.id, "")).toEqual({
+        ok: false,
+        error: "This coupon was cancelled because its purchase was refunded.",
+      });
+      const access = await getAccess(
+        db,
+        await requestAs(teamMember.id),
+        base.course.id
+      );
+      expect(access.enrolled).toBe(false);
     }
   });
 });
