@@ -1092,10 +1092,10 @@ function buildDiscretionaryRefundRequestedEmail(
     body: [
       `Hi ${learnerName},`,
       "",
-      `Our team has raised a refund request on your behalf for "${courseTitle}".`,
+      `We have raised a refund request on your behalf for "${courseTitle}".`,
       `The refund is for ${formatPrice(purchase.amountPaid)}, the amount you paid.`,
       "",
-      "Another member of our team will review it. You do not need to do anything — we will email you again when it is done.",
+      "A second person at Cadence will review it. You do not need to do anything — we will email you again when it is done.",
       "",
       "— The Cadence team",
     ].join("\n"),
