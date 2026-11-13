@@ -18,10 +18,9 @@ import {
 import {
   approveRefundRequest,
   declineRefundRequest,
-  markRefundFailed,
-  markRefundIssued,
   raiseRefundRequest,
 } from "./refunds.server";
+import { markRefundFailed, markRefundIssued } from "./refund-money.server";
 
 let db: ReturnType<typeof createTestDb>;
 let base: ReturnType<typeof seedBaseData>;

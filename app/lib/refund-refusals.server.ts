@@ -6,8 +6,8 @@ import {
   type DecisionRefusal,
   type DiscretionaryRefusal,
   type RefundIneligibility,
-  type RefundStateRefusal,
 } from "~/lib/refunds.server";
+import type { RefundStateRefusal } from "~/lib/refund-money.server";
 
 // ─── Refund refusals ───
 // What each refusal from the refunds module tells the person, and the HTTP

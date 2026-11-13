@@ -27,12 +27,23 @@ import {
   RefundStatus,
   UserRole,
 } from "~/db/schema";
-import { formatPrice } from "~/lib/utils";
+import {
+  buildDiscretionaryRefundRequestedEmail,
+  buildRefundApprovedEmail,
+  buildRefundDeclinedEmail,
+  buildRefundRequestedEmail,
+  sendEmail,
+  type RefundEmail,
+} from "~/lib/refund-emails.server";
 
 // ─── Refunds ───
-// Every refund operation lives here. Routes load the session, call in, and
-// turn the outcome into a response — so the course page's refund offer and
-// the refund action can never disagree.
+// Refund Requests: raising, deciding and listing them. Routes load the
+// session, call in, and turn the outcome into a response — so the course
+// page's refund offer and the refund action can never disagree.
+//
+// Close by: the Refund's money states (`~/lib/refund-money.server`), the
+// emails to the learner (`~/lib/refund-emails.server`), and what each
+// refusal tells the person (`~/lib/refund-refusals.server`).
 //
 // Every operation takes the database as its first argument (the test seam),
 // then positional parameters (project convention). Expected refusals come
@@ -251,7 +262,7 @@ export function raiseRefundRequest(
 // there are no reverse operations. Approval never rechecks Refund
 // Eligibility (ADR 0001) — the request is judged as it was raised.
 
-type Admin = { id: number };
+export type Admin = { id: number };
 type RefundRequestRef = { id: number };
 type RefundRequestRow = typeof refunds.$inferSelect;
 
@@ -688,7 +699,7 @@ export function listPurchasesForDiscretionaryRefund(
  * Callers pass an Admin, but the module checks the role itself: no route
  * can decide a Refund Request or move money for someone who isn't one.
  */
-function isAdmin(db: Db, admin: Admin) {
+export function isAdmin(db: Db, admin: Admin) {
   return !!db
     .select({ id: users.id })
     .from(users)
@@ -793,276 +804,6 @@ function learnerOutcome(request: RefundRequestRow): LearnerRefundOutcome {
     case RefundStatus.Declined:
       return { status: "declined", declineReason: request.declineReason ?? "" };
   }
-}
-
-// ─── Refund money states ───
-// Approval creates a Pending Refund. There is no payment provider, so an
-// Admin records by hand whether the money went out: Pending → Issued,
-// Pending → Failed, or Failed → Issued (a retry). Issued is final. The
-// Refund Request stays Approved throughout — the decision and the money are
-// separate.
-
-/** A Refund has no id of its own: it is known by its Refund Request's id. */
-type RefundRef = { id: number };
-
-/** The money an Approved Refund Request sends back, and where it stands. */
-export type Refund = {
-  refundRequestId: number;
-  amountRefunded: number;
-  state: RefundMoneyState;
-  stateChangedAt: string | null;
-};
-
-/** Why a change to a Refund's state was refused. */
-export type RefundStateRefusal =
-  "not_admin" | "no_refund" | "already_issued" | "already_failed";
-
-export type RefundStateOutcome =
-  { ok: true; refund: Refund } | { ok: false; refusal: RefundStateRefusal };
-
-/** An Admin confirms the money has been sent. Allowed from Pending or Failed. */
-export function markRefundIssued(
-  db: Db,
-  admin: Admin,
-  refund: RefundRef,
-  now: Date = new Date()
-): RefundStateOutcome {
-  if (!isAdmin(db, admin)) return { ok: false, refusal: "not_admin" };
-  return moveRefund(
-    db,
-    refund,
-    [RefundMoneyState.Pending, RefundMoneyState.Failed],
-    RefundMoneyState.Issued,
-    now
-  );
-}
-
-/** An Admin records that the money couldn't be sent. Allowed from Pending. */
-export function markRefundFailed(
-  db: Db,
-  admin: Admin,
-  refund: RefundRef,
-  now: Date = new Date()
-): RefundStateOutcome {
-  if (!isAdmin(db, admin)) return { ok: false, refusal: "not_admin" };
-  return moveRefund(
-    db,
-    refund,
-    [RefundMoneyState.Pending],
-    RefundMoneyState.Failed,
-    now
-  );
-}
-
-/**
- * Moves a Refund to `to` only while it is in one of the `from` states. The
- * state is part of the update's WHERE, so two Admins acting at once can't
- * both win; the loser is told why from the state that beat them.
- */
-function moveRefund(
-  db: Db,
-  refund: RefundRef,
-  from: RefundMoneyState[],
-  to: RefundMoneyState,
-  now: Date
-): RefundStateOutcome {
-  const moved = db
-    .update(refunds)
-    .set({ refundState: to, refundStateChangedAt: now.toISOString() })
-    .where(
-      and(
-        eq(refunds.id, refund.id),
-        eq(refunds.status, RefundStatus.Approved),
-        inArray(refunds.refundState, from)
-      )
-    )
-    .returning()
-    .get();
-  if (moved && moved.refundState !== null && moved.amountRefunded !== null) {
-    return {
-      ok: true,
-      refund: {
-        refundRequestId: moved.id,
-        amountRefunded: moved.amountRefunded,
-        state: moved.refundState,
-        stateChangedAt: moved.refundStateChangedAt,
-      },
-    };
-  }
-
-  const current = db
-    .select({ status: refunds.status, refundState: refunds.refundState })
-    .from(refunds)
-    .where(eq(refunds.id, refund.id))
-    .get();
-
-  if (current?.status !== RefundStatus.Approved) {
-    return { ok: false, refusal: "no_refund" };
-  }
-  if (current.refundState === RefundMoneyState.Issued) {
-    return { ok: false, refusal: "already_issued" };
-  }
-  return { ok: false, refusal: "already_failed" };
-}
-
-export type OutstandingRefund = {
-  /** The Approved Refund Request this Refund belongs to. */
-  id: number;
-  refundState: RefundMoneyState;
-  refundStateChangedAt: string | null;
-  amountRefunded: number;
-  approvedAt: string | null;
-  learner: { id: number; name: string; email: string };
-  course: { id: number; title: string; slug: string };
-};
-
-/**
- * Refunds whose money hasn't been confirmed as sent — Pending and Failed —
- * oldest approval first. Issued Refunds are done and drop off.
- */
-export function listOutstandingRefunds(db: Db): OutstandingRefund[] {
-  return db
-    .select({
-      id: refunds.id,
-      refundState: refunds.refundState,
-      refundStateChangedAt: refunds.refundStateChangedAt,
-      amountRefunded: refunds.amountRefunded,
-      approvedAt: refunds.resolvedAt,
-      learner: { id: users.id, name: users.name, email: users.email },
-      course: { id: courses.id, title: courses.title, slug: courses.slug },
-    })
-    .from(refunds)
-    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
-    .innerJoin(users, eq(purchases.userId, users.id))
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(
-      and(
-        eq(refunds.status, RefundStatus.Approved),
-        inArray(refunds.refundState, [
-          RefundMoneyState.Pending,
-          RefundMoneyState.Failed,
-        ])
-      )
-    )
-    .orderBy(asc(refunds.resolvedAt), asc(refunds.id))
-    .all()
-    .flatMap(({ refundState, amountRefunded, ...rest }) =>
-      refundState === null || amountRefunded === null
-        ? []
-        : [{ ...rest, refundState, amountRefunded }]
-    );
-}
-
-// ─── Emails ───
-// There is no mail transport yet, so built emails go to the server log.
-
-export type RefundEmail = { to: string; subject: string; body: string };
-
-function sendEmail(email: RefundEmail) {
-  console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
-}
-
-function emailContext(db: Db, purchase: Purchase) {
-  const learner = db
-    .select({ name: users.name, email: users.email })
-    .from(users)
-    .where(eq(users.id, purchase.userId))
-    .get();
-  const course = db
-    .select({ title: courses.title })
-    .from(courses)
-    .where(eq(courses.id, purchase.courseId))
-    .get();
-
-  return {
-    to: learner?.email ?? "",
-    learnerName: learner?.name ?? "there",
-    courseTitle: course?.title ?? "your course",
-  };
-}
-
-function buildRefundApprovedEmail(db: Db, purchase: Purchase): RefundEmail {
-  const { to, learnerName, courseTitle } = emailContext(db, purchase);
-
-  return {
-    to,
-    subject: `Refund approved — ${courseTitle}`,
-    body: [
-      `Hi ${learnerName},`,
-      "",
-      `We have approved your refund request for "${courseTitle}".`,
-      `We are sending you ${formatPrice(purchase.amountPaid)}, the full amount you paid.`,
-      "Your access to the course has ended. If you buy it again later, your progress will be waiting for you.",
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
-}
-
-function buildRefundDeclinedEmail(
-  db: Db,
-  purchase: Purchase,
-  declineReason: string
-): RefundEmail {
-  const { to, learnerName, courseTitle } = emailContext(db, purchase);
-
-  return {
-    to,
-    subject: `Refund request declined — ${courseTitle}`,
-    body: [
-      `Hi ${learnerName},`,
-      "",
-      `We have looked at your refund request for "${courseTitle}" and declined it.`,
-      "",
-      "Our reason:",
-      declineReason,
-      "",
-      "You keep full access to the course.",
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
-}
-
-function buildDiscretionaryRefundRequestedEmail(
-  db: Db,
-  purchase: Purchase
-): RefundEmail {
-  const { to, learnerName, courseTitle } = emailContext(db, purchase);
-
-  return {
-    to,
-    subject: `Refund requested — ${courseTitle}`,
-    body: [
-      `Hi ${learnerName},`,
-      "",
-      `We have raised a refund request on your behalf for "${courseTitle}".`,
-      `The refund is for ${formatPrice(purchase.amountPaid)}, the amount you paid.`,
-      "",
-      "A second person at Cadence will review it. You do not need to do anything — we will email you again when it is done.",
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
-}
-
-function buildRefundRequestedEmail(db: Db, purchase: Purchase): RefundEmail {
-  const { to, learnerName, courseTitle } = emailContext(db, purchase);
-
-  return {
-    to,
-    subject: `Refund requested — ${courseTitle}`,
-    body: [
-      `Hi ${learnerName},`,
-      "",
-      `We have your refund request for "${courseTitle}".`,
-      `The refund is for ${formatPrice(purchase.amountPaid)}, the amount you paid.`,
-      "",
-      "Our team reviews every refund request by hand. You do not need to do anything else — we will email you again when it is done.",
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
 }
 
 // ─── Eligibility helpers ───
