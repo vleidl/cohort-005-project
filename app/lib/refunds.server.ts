@@ -661,6 +661,83 @@ function checkDiscretionaryRules(
   return null;
 }
 
+// ─── Learner's Refund Requests ───
+// What a learner sees in Settings: every request they have raised, decided
+// or not, so they can follow its outcome.
+
+export type LearnerRefundRequest = {
+  id: number;
+  reason: string;
+  requestedAt: string;
+  course: { id: number; title: string; slug: string };
+  amountPaid: number;
+  outcome: LearnerRefundOutcome;
+};
+
+/** Where a Refund Request stands, as the learner is allowed to see it. */
+export type LearnerRefundOutcome =
+  | { status: "open" }
+  | { status: "refund_pending" }
+  | { status: "refund_issued" }
+  | { status: "declined"; declineReason: string };
+
+/** All of the learner's Refund Requests, newest first. */
+export function listRefundRequestsForLearner(
+  db: Db,
+  learner: Learner
+): LearnerRefundRequest[] {
+  const rows = db
+    .select({
+      request: refunds,
+      course: { id: courses.id, title: courses.title, slug: courses.slug },
+      amountPaid: purchases.amountPaid,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(purchases.userId, learner.id))
+    .orderBy(desc(refunds.requestedAt), desc(refunds.id))
+    .all();
+
+  return rows.map(({ request, course, amountPaid }) => ({
+    id: request.id,
+    reason: request.reason,
+    requestedAt: request.requestedAt,
+    course,
+    amountPaid,
+    outcome: learnerOutcome(request),
+  }));
+}
+
+/** What Settings tells the learner about a request's outcome. */
+export function describeLearnerRefundOutcome(outcome: LearnerRefundOutcome) {
+  switch (outcome.status) {
+    case "open":
+      return "Waiting on us";
+    case "refund_pending":
+      return "Refund pending";
+    case "refund_issued":
+      return "Refund issued";
+    case "declined":
+      return `Declined: ${outcome.declineReason}`;
+  }
+}
+
+function learnerOutcome(request: RefundRequestRow): LearnerRefundOutcome {
+  switch (request.status) {
+    case RefundStatus.Open:
+      return { status: "open" };
+    case RefundStatus.Approved:
+      // A Failed Refund is the Admins' problem to fix; the learner sees it
+      // as still on its way.
+      return request.refundState === RefundMoneyState.Issued
+        ? { status: "refund_issued" }
+        : { status: "refund_pending" };
+    case RefundStatus.Declined:
+      return { status: "declined", declineReason: request.declineReason ?? "" };
+  }
+}
+
 // ─── Refund money states ───
 // Approval creates a Pending Refund. There is no payment provider, so an
 // Admin records by hand whether the money went out: Pending → Issued,
