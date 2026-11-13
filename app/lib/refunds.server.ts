@@ -7,6 +7,7 @@ import {
   isNotNull,
   isNull,
   ne,
+  notExists,
   sql,
 } from "drizzle-orm";
 import type { Db } from "~/db";
@@ -418,8 +419,17 @@ function voidUnclaimedCoupons(tx: Db, purchase: Purchase, now: Date) {
  * progress, quiz attempts and watch history stay, hidden because they're
  * shown only to enrolled learners, and come back when a repurchase creates a
  * new Enrollment (ADR 0002). Don't delete them here.
+ *
+ * The Enrollment stays while the learner holds another purchase of the
+ * course with no Approved Refund Request — the same rule ratings use to
+ * decide a learner is refunded (`~/lib/ratings.server`). Runs after the
+ * approval is recorded, so this purchase already counts as refunded.
  */
 function endEnrollment(tx: Db, purchase: Purchase) {
+  if (hasUnrefundedPurchaseOfCourse(tx, purchase.userId, purchase.courseId)) {
+    return;
+  }
+
   tx.delete(enrollments)
     .where(
       and(
@@ -1049,6 +1059,34 @@ function hasApprovedRefundForCourse(
         eq(purchases.userId, learnerId),
         eq(purchases.courseId, courseId),
         eq(refunds.status, RefundStatus.Approved)
+      )
+    )
+    .get();
+}
+
+function hasUnrefundedPurchaseOfCourse(
+  db: Db,
+  learnerId: number,
+  courseId: number
+) {
+  return !!db
+    .select({ id: purchases.id })
+    .from(purchases)
+    .where(
+      and(
+        eq(purchases.userId, learnerId),
+        eq(purchases.courseId, courseId),
+        notExists(
+          db
+            .select({ id: refunds.id })
+            .from(refunds)
+            .where(
+              and(
+                eq(refunds.purchaseId, purchases.id),
+                eq(refunds.status, RefundStatus.Approved)
+              )
+            )
+        )
       )
     )
     .get();

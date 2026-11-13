@@ -361,6 +361,26 @@ describe("approving a Refund Request", () => {
     expect(access.canViewContent).toBe(false);
   });
 
+  // Access follows the purchases: refunding an older purchase doesn't take
+  // away what a later, unrefunded purchase of the course paid for.
+  it("keeps access while another purchase of the course is unrefunded", async () => {
+    const older = buyCourse(db, base.user.id, base.course.id, {
+      purchasedAt: daysAgo(3),
+    });
+    buyCourse(db, base.user.id, base.course.id);
+
+    expect(approveRefundRequest(db, admin, raise(base.user, older)).ok).toBe(
+      true
+    );
+
+    const access = await getAccess(
+      db,
+      await requestAs(base.user.id),
+      base.course.id
+    );
+    expect(access.enrolled).toBe(true);
+  });
+
   // ADR 0002: progress is hidden, not deleted, so it comes back on a
   // repurchase. Deleting it would lose what Admins need to judge later asks.
   it("hides the learner's progress, and brings it back when they buy again", async () => {
