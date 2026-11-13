@@ -15,12 +15,12 @@ A Cadence staff member who runs the platform, including deciding Refund Requests
 _Avoid_: the team, staff, support
 
 **Refund Eligibility**:
-The rules that decide whether a learner may raise a Refund Request at all. An Exception Refund Request is the only way around them. They are checked when the request is raised, not when an Admin decides it, so an Open Refund Request never expires.
+The rules that decide whether a learner may raise a Refund Request at all. A Discretionary Refund Request is the only way around them. They are checked when the request is raised, not when an Admin decides it, so an Open Refund Request never expires.
 _Avoid_: Refund policy (for the rules themselves)
 
-**Exception Refund Request**:
+**Discretionary Refund Request**:
 A Refund Request an Admin raises on a learner's behalf, with the Admin's own reason, for a case Refund Eligibility doesn't allow. A different Admin must decide it.
-_Avoid_: Manual refund, Override, Goodwill refund
+_Avoid_: Exception Refund Request, Manual refund, Override, Goodwill refund
 
 **Open Refund Request**:
 A Refund Request no Admin has decided yet.
