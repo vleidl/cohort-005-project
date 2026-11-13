@@ -296,6 +296,7 @@ export function declineRefundRequest(
 
 /** Why an Admin's decision was refused. */
 export type DecisionRefusal =
+  | "not_admin"
   | "not_found"
   | "already_decided"
   | "own_request"
@@ -306,6 +307,8 @@ export type DecisionRefusal =
 /** What the Admin is told when a decision is refused. */
 export function describeDecisionRefusal(refusal: DecisionRefusal) {
   switch (refusal) {
+    case "not_admin":
+      return NOT_ADMIN_MESSAGE;
     case "not_found":
       return "That refund request doesn't exist.";
     case "already_decided":
@@ -336,6 +339,8 @@ function guardDecision(
 ):
   | { ok: true; request: RefundRequestRow; purchase: Purchase }
   | { ok: false; refusal: DecisionRefusal } {
+  if (!isAdmin(db, admin)) return refuse("not_admin");
+
   const row = db
     .select({ request: refunds, purchase: purchases })
     .from(refunds)
@@ -566,9 +571,12 @@ export type DiscretionaryRefundIneligibility =
     >
   | "purchase_already_refunded";
 
+/** Why a Discretionary Refund Request couldn't be raised. */
+export type DiscretionaryRefusal = DiscretionaryRefundIneligibility | "not_admin";
+
 /** What the Admin is told when a rule stops a Discretionary Refund Request. */
 export function describeDiscretionaryRefundIneligibility(
-  rule: DiscretionaryRefundIneligibility
+  rule: DiscretionaryRefusal
 ) {
   switch (rule) {
     case "not_purchaser":
@@ -579,6 +587,8 @@ export function describeDiscretionaryRefundIneligibility(
       return "A team seat from this purchase has been claimed, so it can't be refunded.";
     case "purchase_already_refunded":
       return "This purchase has already been refunded.";
+    case "not_admin":
+      return NOT_ADMIN_MESSAGE;
   }
 }
 
@@ -588,7 +598,7 @@ export type RaiseDiscretionaryRefundRequestOutcome =
       refundRequest: typeof refunds.$inferSelect;
       email: RefundEmail;
     }
-  | { ok: false; rule: DiscretionaryRefundIneligibility };
+  | { ok: false; rule: DiscretionaryRefusal };
 
 /**
  * An Admin raises a Discretionary Refund Request for a learner's purchase.
@@ -604,6 +614,10 @@ export function raiseDiscretionaryRefundRequest(
   now: Date = new Date()
 ): RaiseDiscretionaryRefundRequestOutcome {
   const outcome = db.transaction((tx) => {
+    if (!isAdmin(tx, admin)) {
+      return { ok: false as const, rule: "not_admin" as const };
+    }
+
     const rule = checkDiscretionaryRules(tx, learner, purchase);
     if (rule) return { ok: false as const, rule };
 
@@ -656,6 +670,20 @@ export function listPurchasesForDiscretionaryRefund(
     .innerJoin(courses, eq(purchases.courseId, courses.id))
     .orderBy(desc(purchases.createdAt), desc(purchases.id))
     .all();
+}
+
+const NOT_ADMIN_MESSAGE = "Only Admins can do that.";
+
+/**
+ * Callers pass an Admin, but the module checks the role itself: no route
+ * can decide a Refund Request or move money for someone who isn't one.
+ */
+function isAdmin(db: Db, admin: Admin) {
+  return !!db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.id, admin.id), eq(users.role, UserRole.Admin)))
+    .get();
 }
 
 /** Whether some Admin other than this one could decide a request. */
@@ -766,7 +794,11 @@ function learnerOutcome(request: RefundRequestRow): LearnerRefundOutcome {
 type RefundRef = { id: number };
 
 /** Why a change to a Refund's state was refused. */
-export type RefundStateRefusal = "no_refund" | "already_issued" | "already_failed";
+export type RefundStateRefusal =
+  | "not_admin"
+  | "no_refund"
+  | "already_issued"
+  | "already_failed";
 
 export type RefundStateOutcome =
   | { ok: true; refund: RefundRequestRow }
@@ -775,6 +807,8 @@ export type RefundStateOutcome =
 /** What the Admin is told when a change to a Refund's state is refused. */
 export function describeRefundStateRefusal(refusal: RefundStateRefusal) {
   switch (refusal) {
+    case "not_admin":
+      return NOT_ADMIN_MESSAGE;
     case "no_refund":
       return "That refund doesn't exist. Only an approved refund request has a refund.";
     case "already_issued":
@@ -791,6 +825,7 @@ export function markRefundIssued(
   refund: RefundRef,
   now: Date = new Date()
 ): RefundStateOutcome {
+  if (!isAdmin(db, admin)) return { ok: false, refusal: "not_admin" };
   return moveRefund(
     db,
     refund,
@@ -807,6 +842,7 @@ export function markRefundFailed(
   refund: RefundRef,
   now: Date = new Date()
 ): RefundStateOutcome {
+  if (!isAdmin(db, admin)) return { ok: false, refusal: "not_admin" };
   return moveRefund(
     db,
     refund,

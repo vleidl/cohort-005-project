@@ -529,6 +529,44 @@ describe("decision guards", () => {
     });
   });
 
+  // Only Admins decide or move money, whoever calls the module.
+  it("refuses anyone who isn't an Admin", () => {
+    const instructor = base.instructor;
+    const learner = addUser(db, "Learner");
+    const purchase = buyCourse(db, learner.id, base.course.id);
+    const request = raise(learner, purchase);
+
+    expect(approveRefundRequest(db, instructor, request)).toEqual({
+      ok: false,
+      refusal: "not_admin",
+    });
+    expect(declineRefundRequest(db, instructor, request, "No.")).toEqual({
+      ok: false,
+      refusal: "not_admin",
+    });
+
+    approveRefundRequest(db, admin, request);
+    expect(markRefundIssued(db, instructor, request)).toEqual({
+      ok: false,
+      refusal: "not_admin",
+    });
+    expect(markRefundFailed(db, instructor, request)).toEqual({
+      ok: false,
+      refusal: "not_admin",
+    });
+    expect(listOutstandingRefunds(db)).toEqual([
+      expect.objectContaining({
+        id: request.id,
+        refundState: schema.RefundMoneyState.Pending,
+      }),
+    ]);
+
+    const other = buyCourse(db, base.user.id, base.course.id);
+    expect(
+      raiseDiscretionaryRefundRequest(db, instructor, base.user, other, "Hm.")
+    ).toEqual({ ok: false, rule: "not_admin" });
+  });
+
   // No conflict of interest: an Admin who bought a course can ask for a
   // refund like anyone else, but another Admin has to decide it.
   it("refuses an Admin deciding their own Refund Request", () => {

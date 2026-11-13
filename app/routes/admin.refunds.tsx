@@ -160,6 +160,7 @@ export async function action({ request }: Route.ActionArgs) {
 
 function throwRefusal(refusal: DecisionRefusal): never {
   const status = {
+    not_admin: 403,
     not_found: 404,
     already_decided: 409,
     own_request: 403,
@@ -173,6 +174,7 @@ function throwRefusal(refusal: DecisionRefusal): never {
 
 function throwRefundStateRefusal(refusal: RefundStateRefusal): never {
   const status = {
+    not_admin: 403,
     no_refund: 404,
     already_issued: 409,
     already_failed: 409,
