@@ -658,6 +658,18 @@ describe("Discretionary Refund Requests", () => {
     ).toEqual({ ok: false, rule: "claimed_team_seat" });
   });
 
+  // Discretion overrides one Refund per course, never one Refund per
+  // purchase: the same money can't be sent back twice.
+  it("never refunds a purchase that already has an Approved Refund Request", () => {
+    const purchase = buyCourse(db, base.user.id, base.course.id);
+    approveRefundRequest(db, admin, raise(base.user, purchase));
+
+    expect(
+      raiseDiscretionaryRefundRequest(db, admin, base.user, purchase, "Again.")
+    ).toEqual({ ok: false, rule: "purchase_already_refunded" });
+    expect(listOpenRefundRequests(db)).toEqual([]);
+  });
+
   it("never overrides an existing Open Refund Request", () => {
     const purchase = buyCourse(db, base.user.id, base.course.id);
     raise(base.user, purchase);

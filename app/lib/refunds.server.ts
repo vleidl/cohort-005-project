@@ -545,11 +545,16 @@ function getEarlierRequests(
 // and a different Admin must decide it (see `guardDecision`), so one person
 // can't send money out against the rules alone (ADR 0001).
 
-/** The rules even a Discretionary Refund Request never overrides. */
-export type DiscretionaryRefundIneligibility = Extract<
-  RefundIneligibility,
-  "not_purchaser" | "request_already_open" | "claimed_team_seat"
->;
+/**
+ * The rules even a Discretionary Refund Request never overrides. It sets
+ * aside one Refund per course, but never one Refund per purchase.
+ */
+export type DiscretionaryRefundIneligibility =
+  | Extract<
+      RefundIneligibility,
+      "not_purchaser" | "request_already_open" | "claimed_team_seat"
+    >
+  | "purchase_already_refunded";
 
 /** What the Admin is told when a rule stops a Discretionary Refund Request. */
 export function describeDiscretionaryRefundIneligibility(
@@ -562,6 +567,8 @@ export function describeDiscretionaryRefundIneligibility(
       return "This purchase already has an Open Refund Request. Decide that one instead.";
     case "claimed_team_seat":
       return "A team seat from this purchase has been claimed, so it can't be refunded.";
+    case "purchase_already_refunded":
+      return "This purchase has already been refunded.";
   }
 }
 
@@ -657,6 +664,7 @@ function checkDiscretionaryRules(
 ): DiscretionaryRefundIneligibility | null {
   if (purchase.userId !== learner.id) return "not_purchaser";
   if (hasOpenRefundRequest(db, purchase.id)) return "request_already_open";
+  if (hasApprovedRefundRequest(db, purchase.id)) return "purchase_already_refunded";
   if (hasClaimedSeat(db, purchase.id)) return "claimed_team_seat";
   return null;
 }
@@ -1009,6 +1017,19 @@ function hasOpenRefundRequest(db: Db, purchaseId: number) {
       and(
         eq(refunds.purchaseId, purchaseId),
         eq(refunds.status, RefundStatus.Open)
+      )
+    )
+    .get();
+}
+
+function hasApprovedRefundRequest(db: Db, purchaseId: number) {
+  return !!db
+    .select({ id: refunds.id })
+    .from(refunds)
+    .where(
+      and(
+        eq(refunds.purchaseId, purchaseId),
+        eq(refunds.status, RefundStatus.Approved)
       )
     )
     .get();
