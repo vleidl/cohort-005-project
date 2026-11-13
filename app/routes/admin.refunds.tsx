@@ -4,14 +4,21 @@ import { toast } from "sonner";
 import { z } from "zod";
 import type { Route } from "./+types/admin.refunds";
 import { db } from "~/db";
+import { RefundMoneyState } from "~/db/schema";
 import { requireAdmin } from "~/lib/access.server";
 import {
   approveRefundRequest,
   declineRefundRequest,
   describeDecisionRefusal,
+  describeRefundStateRefusal,
   listOpenRefundRequests,
+  listOutstandingRefunds,
+  markRefundFailed,
+  markRefundIssued,
   type DecisionRefusal,
+  type OutstandingRefund,
   type RefundQueueEntry,
+  type RefundStateRefusal,
 } from "~/lib/refunds.server";
 import { parseFormData } from "~/lib/validation";
 import { formatDuration, formatPrice } from "~/lib/utils";
@@ -42,6 +49,14 @@ const refundActionSchema = z.discriminatedUnion("intent", [
       .min(1, "Give the learner a reason for declining.")
       .max(1000, "Please keep the reason under 1000 characters."),
   }),
+  z.object({
+    intent: z.literal("mark_issued"),
+    refundId: z.coerce.number().int(),
+  }),
+  z.object({
+    intent: z.literal("mark_failed"),
+    refundId: z.coerce.number().int(),
+  }),
 ]);
 
 export function meta() {
@@ -57,6 +72,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   return {
     adminId: admin.id,
     openRefundRequests: listOpenRefundRequests(db),
+    outstandingRefunds: listOutstandingRefunds(db),
   };
 }
 
@@ -88,6 +104,16 @@ export async function action({ request }: Route.ActionArgs) {
       if (!outcome.ok) throwRefusal(outcome.refusal);
       return { message: "Refund Request declined. The learner has been emailed." };
     }
+    case "mark_issued": {
+      const outcome = markRefundIssued(db, admin, { id: form.refundId });
+      if (!outcome.ok) throwRefundStateRefusal(outcome.refusal);
+      return { message: "Refund marked Issued." };
+    }
+    case "mark_failed": {
+      const outcome = markRefundFailed(db, admin, { id: form.refundId });
+      if (!outcome.ok) throwRefundStateRefusal(outcome.refusal);
+      return { message: "Refund marked Failed. Retry and mark it Issued once sent." };
+    }
   }
 }
 
@@ -102,8 +128,18 @@ function throwRefusal(refusal: DecisionRefusal): never {
   throw data(describeDecisionRefusal(refusal), { status: status[refusal] });
 }
 
+function throwRefundStateRefusal(refusal: RefundStateRefusal): never {
+  const status = {
+    no_refund: 404,
+    already_issued: 409,
+    already_failed: 409,
+  } satisfies Record<RefundStateRefusal, number>;
+
+  throw data(describeRefundStateRefusal(refusal), { status: status[refusal] });
+}
+
 export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
-  const { openRefundRequests } = loaderData;
+  const { openRefundRequests, outstandingRefunds } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -124,7 +160,8 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
 
       <div className="space-y-10">
         <RefundQueueSection entries={openRefundRequests} />
-        {/* Further sections (Refunds to send, Discretionary Refund Requests) go here. */}
+        <RefundsSection refunds={outstandingRefunds} />
+        {/* Further sections (Discretionary Refund Requests) go here. */}
       </div>
     </div>
   );
@@ -292,6 +329,96 @@ function DecisionForm({ refundRequestId }: { refundRequestId: number }) {
           Cancel
         </Button>
       </div>
+    </fetcher.Form>
+  );
+}
+
+// ─── Section: Refunds ───
+// Pending and Failed Refunds: the money still to confirm as sent. Issued
+// Refunds are done and drop off this list.
+
+function RefundsSection({ refunds }: { refunds: OutstandingRefund[] }) {
+  return (
+    <section>
+      <h2 className="mb-1 text-xl font-semibold">Refunds to send</h2>
+      <p className="mb-4 text-sm text-muted-foreground">
+        Pending and Failed Refunds. Mark each Issued once the money has gone out.
+      </p>
+
+      {refunds.length === 0 ? (
+        <Card>
+          <CardContent className="py-8 text-center">
+            <ReceiptText className="mx-auto mb-3 size-8 text-muted-foreground/50" />
+            <p className="text-muted-foreground">No Refunds are waiting to be sent.</p>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="space-y-4">
+          {refunds.map((refund) => (
+            <RefundCard key={refund.id} refund={refund} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RefundCard({ refund }: { refund: OutstandingRefund }) {
+  const failed = refund.refundState === RefundMoneyState.Failed;
+
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-center justify-between gap-4 p-5">
+        <div>
+          <p className="font-medium">
+            {refund.learner.name}{" "}
+            <span className="text-sm font-normal text-muted-foreground">
+              {refund.learner.email}
+            </span>
+          </p>
+          <p className="text-sm text-muted-foreground">{refund.course.title}</p>
+        </div>
+        <div className="text-right text-sm">
+          <p className="font-semibold">{formatPrice(refund.amountRefunded)}</p>
+          <p className={failed ? "text-destructive" : "text-muted-foreground"}>
+            {failed ? "Failed" : "Pending"}
+            {refund.refundStateChangedAt && <> since {formatDate(refund.refundStateChangedAt)}</>}
+          </p>
+        </div>
+        <RefundStateForm refundId={refund.id} failed={failed} />
+      </CardContent>
+    </Card>
+  );
+}
+
+function RefundStateForm({ refundId, failed }: { refundId: number; failed: boolean }) {
+  const fetcher = useFetcher<typeof action>();
+  const busy = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data && "message" in fetcher.data) {
+      toast.success(fetcher.data.message);
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  return (
+    <fetcher.Form method="post" className="flex gap-2">
+      <input type="hidden" name="refundId" value={refundId} />
+      <Button type="submit" name="intent" value="mark_issued" size="sm" disabled={busy}>
+        {failed ? "Retried — mark Issued" : "Mark Issued"}
+      </Button>
+      {!failed && (
+        <Button
+          type="submit"
+          name="intent"
+          value="mark_failed"
+          variant="outline"
+          size="sm"
+          disabled={busy}
+        >
+          Mark Failed
+        </Button>
+      )}
     </fetcher.Form>
   );
 }

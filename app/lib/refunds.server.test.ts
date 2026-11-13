@@ -15,6 +15,9 @@ import {
   checkRefundEligibility,
   declineRefundRequest,
   listOpenRefundRequests,
+  listOutstandingRefunds,
+  markRefundFailed,
+  markRefundIssued,
   raiseRefundRequest,
   type RefundIneligibility,
 } from "./refunds.server";
@@ -602,5 +605,125 @@ describe("the refund queue", () => {
         declineReason: "Try the second module first.",
       }),
     ]);
+  });
+});
+
+describe("moving the money for a Refund", () => {
+  function approvedRefund(learner = base.user, amountPaid = 4900) {
+    const purchase = buyCourse(db, learner.id, base.course.id, { amountPaid });
+    const request = raise(learner, purchase);
+    approveRefundRequest(db, admin, request);
+    return request;
+  }
+
+  it("lists a new Refund as Pending for the full amount paid", () => {
+    const request = approvedRefund(base.user, 7900);
+
+    expect(listOutstandingRefunds(db)).toEqual([
+      expect.objectContaining({
+        id: request.id,
+        refundState: schema.RefundMoneyState.Pending,
+        amountRefunded: 7900,
+        learner: expect.objectContaining({ id: base.user.id }),
+        course: expect.objectContaining({ id: base.course.id }),
+      }),
+    ]);
+  });
+
+  // A temporary failure to send money isn't the end: the Admin retries
+  // and marks it Issued later.
+  it("allows Pending → Failed → Issued", () => {
+    const request = approvedRefund();
+
+    expect(markRefundFailed(db, admin, request)).toMatchObject({
+      ok: true,
+      refund: { refundState: schema.RefundMoneyState.Failed },
+    });
+    expect(listOutstandingRefunds(db)).toEqual([
+      expect.objectContaining({
+        id: request.id,
+        refundState: schema.RefundMoneyState.Failed,
+      }),
+    ]);
+
+    expect(markRefundIssued(db, admin, request)).toMatchObject({
+      ok: true,
+      refund: { refundState: schema.RefundMoneyState.Issued },
+    });
+    expect(listOutstandingRefunds(db)).toEqual([]);
+  });
+
+  it("allows Pending → Issued", () => {
+    const request = approvedRefund();
+
+    expect(markRefundIssued(db, admin, request).ok).toBe(true);
+    expect(listOutstandingRefunds(db)).toEqual([]);
+  });
+
+  // The decision and the money are separate: a failed transfer doesn't
+  // reopen or undo the decision.
+  it("leaves the Refund Request Approved when the Refund fails", () => {
+    const request = approvedRefund();
+
+    expect(markRefundFailed(db, admin, request)).toMatchObject({
+      ok: true,
+      refund: { status: schema.RefundStatus.Approved },
+    });
+    expect(listOpenRefundRequests(db)).toEqual([]);
+  });
+
+  it("records when the Refund's state last changed", () => {
+    const request = approvedRefund();
+    const later = new Date(Date.now() + 60_000);
+
+    markRefundFailed(db, admin, request, later);
+
+    expect(listOutstandingRefunds(db)).toEqual([
+      expect.objectContaining({ refundStateChangedAt: later.toISOString() }),
+    ]);
+  });
+
+  // Issued means the money has gone; nothing can change after that.
+  it("refuses any change after the Refund is Issued", () => {
+    const request = approvedRefund();
+    markRefundIssued(db, admin, request);
+
+    expect(markRefundFailed(db, admin, request)).toEqual({
+      ok: false,
+      refusal: "already_issued",
+    });
+    expect(markRefundIssued(db, admin, request)).toEqual({
+      ok: false,
+      refusal: "already_issued",
+    });
+  });
+
+  it("refuses marking a Failed Refund Failed again", () => {
+    const request = approvedRefund();
+    markRefundFailed(db, admin, request);
+
+    expect(markRefundFailed(db, admin, request)).toEqual({
+      ok: false,
+      refusal: "already_failed",
+    });
+  });
+
+  // Only an Approved Refund Request has a Refund to move.
+  it("refuses Refund Requests that have no Refund", () => {
+    const open = raise(base.user, buyCourse(db, base.user.id, base.course.id));
+    const learner = addUser(db, "Declined Learner");
+    const declined = raise(learner, buyCourse(db, learner.id, base.course.id));
+    declineRefundRequest(db, admin, declined, "No.");
+
+    for (const request of [open, declined, { id: 9999 }]) {
+      expect(markRefundIssued(db, admin, request)).toEqual({
+        ok: false,
+        refusal: "no_refund",
+      });
+      expect(markRefundFailed(db, admin, request)).toEqual({
+        ok: false,
+        refusal: "no_refund",
+      });
+    }
   });
 });
