@@ -14,6 +14,7 @@ import {
   LessonProgressStatus,
   RefundMoneyState,
   RefundStatus,
+  UserRole,
 } from "~/db/schema";
 import { formatPrice } from "~/lib/utils";
 
@@ -287,7 +288,9 @@ export type DecisionRefusal =
   | "not_found"
   | "already_decided"
   | "own_request"
-  | "decline_reason_missing";
+  | "decline_reason_missing"
+  | "own_discretionary_request"
+  | "sole_admin_discretionary_request";
 
 /** What the Admin is told when a decision is refused. */
 export function describeDecisionRefusal(refusal: DecisionRefusal) {
@@ -300,6 +303,10 @@ export function describeDecisionRefusal(refusal: DecisionRefusal) {
       return "You can't decide a refund request on your own purchase.";
     case "decline_reason_missing":
       return "Give the learner a reason for declining.";
+    case "own_discretionary_request":
+      return "You raised this Discretionary Refund Request, so a different Admin has to decide it.";
+    case "sole_admin_discretionary_request":
+      return "You raised this Discretionary Refund Request and you are the only Admin. It can't be decided until a second Admin exists.";
   }
 }
 
@@ -330,6 +337,16 @@ function guardDecision(
 
   // No conflict of interest: an Admin can't decide on their own money.
   if (row.purchase.userId === admin.id) return refuse("own_request");
+
+  // A Discretionary Refund Request sets the rules aside, so a different
+  // Admin must decide it. With no other Admin, it waits until one exists.
+  if (row.request.discretionary && row.request.raisedByUserId === admin.id) {
+    return refuse(
+      hasOtherAdmin(db, admin.id)
+        ? "own_discretionary_request"
+        : "sole_admin_discretionary_request"
+    );
+  }
 
   return { ok: true, request: row.request, purchase: row.purchase };
 }
@@ -393,6 +410,13 @@ export type RefundQueueEntry = {
   reason: string;
   requestedAt: string;
   discretionary: boolean;
+  /** The Admin who raised a Discretionary Refund Request; null otherwise. */
+  raisedBy: { id: number; name: string } | null;
+  /**
+   * A Discretionary Refund Request whose raiser is the only Admin: nobody
+   * can decide it until a second Admin exists.
+   */
+  soleAdminWarning: boolean;
   learner: { id: number; name: string; email: string };
   course: { id: number; title: string; slug: string };
   purchase: { id: number; amountPaid: number; purchasedAt: string };
@@ -432,6 +456,11 @@ export function listOpenRefundRequests(db: Db): RefundQueueEntry[] {
       reason: request.reason,
       requestedAt: request.requestedAt,
       discretionary: request.discretionary,
+      raisedBy: getRaisedBy(db, request.raisedByUserId),
+      soleAdminWarning:
+        request.discretionary &&
+        request.raisedByUserId !== null &&
+        !hasOtherAdmin(db, request.raisedByUserId),
       learner,
       course,
       purchase: {
@@ -445,6 +474,17 @@ export function listOpenRefundRequests(db: Db): RefundQueueEntry[] {
       earlierRequests: getEarlierRequests(db, purchase.id, request.id),
     };
   });
+}
+
+function getRaisedBy(db: Db, raisedByUserId: number | null) {
+  if (raisedByUserId === null) return null;
+  return (
+    db
+      .select({ id: users.id, name: users.name })
+      .from(users)
+      .where(eq(users.id, raisedByUserId))
+      .get() ?? null
+  );
 }
 
 function getEarlierRequests(
@@ -467,6 +507,129 @@ function getEarlierRequests(
     )
     .orderBy(asc(refunds.requestedAt), asc(refunds.id))
     .all();
+}
+
+// ─── Discretionary Refund Requests ───
+// For genuinely exceptional cases, an Admin raises a Refund Request on a
+// learner's behalf with their own reason. It sets Refund Eligibility aside —
+// the window, watch limit, completion limit and one-Refund-per-course rule —
+// and a different Admin must decide it (see `guardDecision`), so one person
+// can't send money out against the rules alone (ADR 0001).
+
+/** The rules even a Discretionary Refund Request never overrides. */
+export type DiscretionaryRefundIneligibility = Extract<
+  RefundIneligibility,
+  "not_purchaser" | "request_already_open" | "claimed_team_seat"
+>;
+
+/** What the Admin is told when a rule stops a Discretionary Refund Request. */
+export function describeDiscretionaryRefundIneligibility(
+  rule: DiscretionaryRefundIneligibility
+) {
+  switch (rule) {
+    case "not_purchaser":
+      return "That learner didn't make this purchase.";
+    case "request_already_open":
+      return "This purchase already has an Open Refund Request. Decide that one instead.";
+    case "claimed_team_seat":
+      return "A team seat from this purchase has been claimed, so it can't be refunded.";
+  }
+}
+
+export type RaiseDiscretionaryRefundRequestOutcome =
+  | {
+      ok: true;
+      refundRequest: typeof refunds.$inferSelect;
+      email: RefundEmail;
+    }
+  | { ok: false; rule: DiscretionaryRefundIneligibility };
+
+/**
+ * An Admin raises a Discretionary Refund Request for a learner's purchase.
+ * It still can't take a claimed seat from a team, or open a second request
+ * on a purchase that already has one.
+ */
+export function raiseDiscretionaryRefundRequest(
+  db: Db,
+  admin: Admin,
+  learner: Learner,
+  purchase: Purchase,
+  reason: string,
+  now: Date = new Date()
+): RaiseDiscretionaryRefundRequestOutcome {
+  const outcome = db.transaction((tx) => {
+    const rule = checkDiscretionaryRules(tx, learner, purchase);
+    if (rule) return { ok: false as const, rule };
+
+    const refundRequest = tx
+      .insert(refunds)
+      .values({
+        purchaseId: purchase.id,
+        status: RefundStatus.Open,
+        reason,
+        requestedAt: now.toISOString(),
+        discretionary: true,
+        raisedByUserId: admin.id,
+      })
+      .returning()
+      .get();
+
+    return { ok: true as const, refundRequest };
+  });
+
+  if (!outcome.ok) return outcome;
+
+  const email = buildDiscretionaryRefundRequestedEmail(db, purchase);
+  sendEmail(email);
+
+  return { ...outcome, email };
+}
+
+export type PurchaseForDiscretionaryRefund = {
+  id: number;
+  amountPaid: number;
+  purchasedAt: string;
+  learner: { id: number; name: string; email: string };
+  course: { id: number; title: string };
+};
+
+/** Purchases an Admin can choose from when raising one, newest first. */
+export function listPurchasesForDiscretionaryRefund(
+  db: Db
+): PurchaseForDiscretionaryRefund[] {
+  return db
+    .select({
+      id: purchases.id,
+      amountPaid: purchases.amountPaid,
+      purchasedAt: purchases.createdAt,
+      learner: { id: users.id, name: users.name, email: users.email },
+      course: { id: courses.id, title: courses.title },
+    })
+    .from(purchases)
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .orderBy(desc(purchases.createdAt), desc(purchases.id))
+    .all();
+}
+
+/** Whether some Admin other than this one could decide a request. */
+function hasOtherAdmin(db: Db, adminId: number) {
+  return !!db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.role, UserRole.Admin), ne(users.id, adminId)))
+    .get();
+}
+
+function checkDiscretionaryRules(
+  db: Db,
+  learner: Learner,
+  purchase: Purchase
+): DiscretionaryRefundIneligibility | null {
+  if (purchase.userId !== learner.id) return "not_purchaser";
+  if (hasOpenRefundRequest(db, purchase.id)) return "request_already_open";
+  if (hasClaimedSeat(db, purchase.id)) return "claimed_team_seat";
+  return null;
 }
 
 // ─── Emails ───
@@ -534,6 +697,28 @@ function buildRefundDeclinedEmail(
       declineReason,
       "",
       "You keep full access to the course.",
+      "",
+      "— The Cadence team",
+    ].join("\n"),
+  };
+}
+
+function buildDiscretionaryRefundRequestedEmail(
+  db: Db,
+  purchase: Purchase
+): RefundEmail {
+  const { to, learnerName, courseTitle } = emailContext(db, purchase);
+
+  return {
+    to,
+    subject: `Refund requested — ${courseTitle}`,
+    body: [
+      `Hi ${learnerName},`,
+      "",
+      `Our team has raised a refund request on your behalf for "${courseTitle}".`,
+      `The refund is for ${formatPrice(purchase.amountPaid)}, the amount you paid.`,
+      "",
+      "Another member of our team will review it. You do not need to do anything — we will email you again when it is done.",
       "",
       "— The Cadence team",
     ].join("\n"),
