@@ -14,6 +14,7 @@ import {
   enrollments,
   lessonProgress,
   courseRatings,
+  coupons,
   LessonProgressStatus,
 } from "~/db/schema";
 import { eq, and, or, sql } from "drizzle-orm";
@@ -50,6 +51,10 @@ import {
 } from "~/lib/ppp";
 import { parseFormData } from "~/lib/validation";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
+import {
+  EMPTY_RATING_SUMMARY,
+  getCourseRatingSummaries,
+} from "~/lib/ratings.server";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
 import {
   checkRefundEligibility,
@@ -294,13 +299,6 @@ function getNextIncompleteLesson(userId: number, courseId: number) {
   return null;
 }
 
-type CourseRatingSummary = {
-  average: number | null;
-  count: number;
-};
-
-const EMPTY_SUMMARY: CourseRatingSummary = { average: null, count: 0 };
-
 function findRating(userId: number, courseId: number) {
   return db
     .select()
@@ -309,26 +307,6 @@ function findRating(userId: number, courseId: number) {
       and(eq(courseRatings.userId, userId), eq(courseRatings.courseId, courseId))
     )
     .get();
-}
-
-function getCourseRatingSummary(courseId: number): CourseRatingSummary {
-  const result = db
-    .select({
-      average: sql<number | null>`avg(${courseRatings.rating})`,
-      count: sql<number>`count(*)`,
-    })
-    .from(courseRatings)
-    .where(eq(courseRatings.courseId, courseId))
-    .get();
-
-  if (!result || result.count === 0 || result.average === null) {
-    return EMPTY_SUMMARY;
-  }
-
-  return {
-    average: Math.round(result.average * 10) / 10,
-    count: result.count,
-  };
 }
 
 function rateCourse(userId: number, courseId: number, rating: number) {
@@ -375,9 +353,17 @@ type RefundOffer =
  * not, why. Asks the same Refund Eligibility check as the refund action, so
  * the page never offers a refund the action would refuse.
  */
-function getRefundOffer(userId: number, courseId: number): RefundOffer | null {
+function getRefundOffer(
+  userId: number,
+  courseId: number,
+  enrolled: boolean
+): RefundOffer | null {
   const purchase = findLatestPurchase(db, userId, courseId);
   if (!purchase) return null;
+
+  // A team buyer isn't enrolled — the seats are for their team — but can
+  // still refund a team Purchase nobody has claimed a seat from.
+  if (!enrolled && !isTeamPurchase(purchase.id)) return null;
 
   const eligibility = checkRefundEligibility(db, { id: userId }, purchase);
   if (!eligibility.eligible) {
@@ -392,6 +378,14 @@ function getRefundOffer(userId: number, courseId: number): RefundOffer | null {
     amount: eligibility.amount,
     lastDayInWindow: eligibility.lastDayInWindow,
   };
+}
+
+function isTeamPurchase(purchaseId: number) {
+  return !!db
+    .select({ id: coupons.id })
+    .from(coupons)
+    .where(eq(coupons.purchaseId, purchaseId))
+    .get();
 }
 
 const ratingSchema = z.object({
@@ -430,9 +424,9 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
+    refundOffer = getRefundOffer(currentUserId, course.id, enrolled);
 
     if (enrolled) {
-      refundOffer = getRefundOffer(currentUserId, course.id);
 
       progress = calculateProgress(currentUserId, course.id, false);
 
@@ -452,7 +446,9 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   // Render sales copy from Markdown to HTML server-side
   const salesCopyHtml = await renderMarkdown(courseWithDetails.salesCopy);
 
-  const ratingSummary = getCourseRatingSummary(course.id);
+  const ratingSummary =
+    getCourseRatingSummaries(db, [course.id]).get(course.id) ??
+    EMPTY_RATING_SUMMARY;
   const userRating = currentUserId
     ? (findRating(currentUserId, course.id)?.rating ?? null)
     : null;
@@ -813,20 +809,13 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                     </Button>
                   </Link>
                   <RateCourse userRating={userRating} />
-                  {refundOffer?.available && (
-                    <RequestRefund
-                      slug={course.slug}
-                      amount={refundOffer.amount}
-                    />
-                  )}
-                  {refundOffer && !refundOffer.available && (
-                    <p className="border-t pt-4 text-xs text-muted-foreground">
-                      {refundOffer.reason}
-                    </p>
-                  )}
+                  <RefundOfferPanel slug={course.slug} offer={refundOffer} />
                 </>
               ) : (
-                enrollButton
+                <>
+                  {enrollButton}
+                  <RefundOfferPanel slug={course.slug} offer={refundOffer} />
+                </>
               )}
               <div className="space-y-2 pt-2 text-sm text-muted-foreground">
                 <div className="flex items-center gap-2">
@@ -892,6 +881,24 @@ function RateCourse({ userRating }: { userRating: number | null }) {
         </p>
       )}
     </div>
+  );
+}
+
+function RefundOfferPanel({
+  slug,
+  offer,
+}: {
+  slug: string;
+  offer: RefundOffer | null;
+}) {
+  if (!offer) return null;
+  if (offer.available) {
+    return <RequestRefund slug={slug} amount={offer.amount} />;
+  }
+  return (
+    <p className="border-t pt-4 text-xs text-muted-foreground">
+      {offer.reason}
+    </p>
   );
 }
 

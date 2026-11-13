@@ -9,11 +9,10 @@ import {
   lessons,
   enrollments as enrollmentsTable,
   lessonProgress,
-  courseRatings,
   CourseStatus,
   LessonProgressStatus,
 } from "~/db/schema";
-import { eq, like, and, or, sql, inArray } from "drizzle-orm";
+import { eq, like, and, or, sql } from "drizzle-orm";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -25,6 +24,7 @@ import { formatPrice } from "~/lib/utils";
 import { resolveCountry } from "~/lib/country.server";
 import { calculatePppPrice } from "~/lib/ppp";
 import { StarRating } from "~/components/star-rating";
+import { getCourseRatingSummaries } from "~/lib/ratings.server";
 
 function buildCourseQuery(
   search: string | null,
@@ -230,47 +230,6 @@ function getCompletedLessonCount(userId: number, courseId: number) {
   return result?.count ?? 0;
 }
 
-type CourseRatingSummary = {
-  average: number | null;
-  count: number;
-};
-
-const EMPTY_SUMMARY: CourseRatingSummary = { average: null, count: 0 };
-
-function getCourseRatingSummaries(
-  courseIds: number[]
-): Map<number, CourseRatingSummary> {
-  const summaries = new Map<number, CourseRatingSummary>();
-
-  if (courseIds.length === 0) return summaries;
-
-  const rows = db
-    .select({
-      courseId: courseRatings.courseId,
-      average: sql<number | null>`avg(${courseRatings.rating})`,
-      count: sql<number>`count(*)`,
-    })
-    .from(courseRatings)
-    .where(inArray(courseRatings.courseId, courseIds))
-    .groupBy(courseRatings.courseId)
-    .all();
-
-  for (const row of rows) {
-    summaries.set(row.courseId, {
-      average: row.average === null ? null : Math.round(row.average * 10) / 10,
-      count: row.count,
-    });
-  }
-
-  for (const courseId of courseIds) {
-    if (!summaries.has(courseId)) {
-      summaries.set(courseId, EMPTY_SUMMARY);
-    }
-  }
-
-  return summaries;
-}
-
 export function meta() {
   return [
     { title: "Browse Courses — Cadence" },
@@ -309,7 +268,10 @@ export async function loader({ request, url }: Route.LoaderArgs) {
     }
   }
 
-  const ratingSummaries = getCourseRatingSummaries(courses.map((c) => c.id));
+  const ratingSummaries = getCourseRatingSummaries(
+    db,
+    courses.map((c) => c.id)
+  );
 
   const coursesWithLessonCount = courses.map((course) => {
     const userProgress = progressMap.get(course.id);
