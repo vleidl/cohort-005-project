@@ -170,7 +170,7 @@ export function meta() {
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const { userId, isAdmin } = await requireInstructorOrAdmin(request);
+  const { userId, isAdmin } = await requireInstructorOrAdmin(db, request);
 
   // Admins span every course; instructors see only the courses they own.
   const questions = getUnansweredQuestions(isAdmin ? null : userId);
@@ -205,7 +205,7 @@ export async function action({ request }: Route.ActionArgs) {
 
   // Answering as the course's voice — so it must be the course's own
   // instructor, or an admin.
-  const access = await requireStaff(request, course.courseId);
+  const access = await requireStaff(db, request, course.courseId);
 
   try {
     createComment(

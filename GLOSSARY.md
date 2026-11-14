@@ -1,6 +1,6 @@
 # Cadence
 
-Cadence sells video courses to learners. This glossary covers the language around getting money back after a purchase.
+Cadence sells video courses to learners. This glossary covers the language around getting money back after a purchase, and around buying seats for a team.
 
 ## Language
 
@@ -11,16 +11,16 @@ A learner's ask, with their reason, to get back what they paid for a purchase. A
 _Avoid_: Refund (for the ask itself), Cancellation, Reversal, Chargeback
 
 **Admin**:
-A Cadence staff member who runs the platform, including deciding Refund Requests. Not the same as a Team admin, who manages a company's seats.
+A Cadence staff member who runs the platform, including deciding Refund Requests. Not the same as a Team Sponsor, who pays for a Team's Seats.
 _Avoid_: the team, staff, support
 
 **Refund Eligibility**:
-The rules that decide whether a learner may raise a Refund Request at all. An Exception Refund Request is the only way around them. They are checked when the request is raised, not when an Admin decides it, so an Open Refund Request never expires.
+The rules that decide whether a learner may raise a Refund Request at all. A Discretionary Refund Request is the only way around them. They are checked when the request is raised, not when an Admin decides it, so an Open Refund Request never expires.
 _Avoid_: Refund policy (for the rules themselves)
 
-**Exception Refund Request**:
+**Discretionary Refund Request**:
 A Refund Request an Admin raises on a learner's behalf, with the Admin's own reason, for a case Refund Eligibility doesn't allow. A different Admin must decide it.
-_Avoid_: Manual refund, Override, Goodwill refund
+_Avoid_: Exception Refund Request, Manual refund, Override, Goodwill refund
 
 **Open Refund Request**:
 A Refund Request no Admin has decided yet.
@@ -46,3 +46,21 @@ _Avoid_: Completed, Paid out
 
 **Failed Refund**:
 A Refund where the money couldn't be sent. The Refund Request stays approved, because the decision hasn't changed, and sending can be tried again until the Refund is Issued.
+
+### Teams
+
+**Team Purchase**:
+A purchase of several Seats in one course, made by a Team Sponsor for their Team.
+_Avoid_: Bulk purchase, Group purchase
+
+**Seat**:
+One place in a course from a Team Purchase. Anyone can claim it to enroll in the course, and once claimed it belongs to whoever claimed it.
+_Avoid_: License, Slot
+
+**Team**:
+The Seats one Team Sponsor has paid for, across all of their Team Purchases.
+_Avoid_: Company, Organization
+
+**Team Sponsor**:
+The person who buys Seats for a Team and hands them out. Paying for Seats doesn't give them one, so they claim a Seat like anyone else to take the course. They stay the Team Sponsor even if every Seat they bought is refunded.
+_Avoid_: Team admin, Team owner, Team manager, Team buyer

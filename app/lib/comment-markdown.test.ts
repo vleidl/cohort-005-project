@@ -59,7 +59,7 @@ describe("renderComment", () => {
       const html = await renderComment('<img src=x onerror="alert(1)">');
 
       expect(html).not.toContain("<img");
-      expect(html).not.toContain("onerror=\"alert(1)\"");
+      expect(html).not.toContain('onerror="alert(1)"');
     });
 
     it("escapes an iframe", async () => {

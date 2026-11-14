@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   GraduationCap,
   MessageSquare,
+  ReceiptText,
   Shield,
   Tag,
   Users,
@@ -39,7 +40,7 @@ interface RecentCourse {
 interface SidebarProps {
   currentUser: CurrentUser | null;
   recentCourses?: RecentCourse[];
-  isTeamAdmin?: boolean;
+  isTeamSponsor?: boolean;
 }
 
 interface NavItem {
@@ -98,6 +99,12 @@ const navItems: NavItem[] = [
     icon: <Tag className="size-4" />,
     roles: [UserRole.Admin],
   },
+  {
+    label: "Refunds",
+    to: "/admin/refunds",
+    icon: <ReceiptText className="size-4" />,
+    roles: [UserRole.Admin],
+  },
 ];
 
 function isVisible(item: NavItem, role: UserRole | null): boolean {
@@ -109,7 +116,7 @@ function isVisible(item: NavItem, role: UserRole | null): boolean {
 export function Sidebar({
   currentUser,
   recentCourses = [],
-  isTeamAdmin = false,
+  isTeamSponsor = false,
 }: SidebarProps) {
   const currentUserRole = currentUser?.role ?? null;
   const [isDark, setIsDark] = useState(false);
@@ -155,7 +162,7 @@ export function Sidebar({
               {item.label}
             </NavLink>
           ))}
-        {isTeamAdmin && (
+        {isTeamSponsor && (
           <NavLink
             to="/team"
             className={({ isActive }) =>

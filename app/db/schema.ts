@@ -37,8 +37,17 @@ export enum RefundStatus {
   Declined = "declined",
 }
 
+// The money side of an Approved Refund Request. Separate from RefundStatus,
+// which is the decision: a Failed Refund leaves its request Approved.
+// Pending → Issued, Pending → Failed, Failed → Issued. Issued is final.
+export enum RefundMoneyState {
+  Pending = "pending",
+  Issued = "issued",
+  Failed = "failed",
+}
+
 export enum TeamMemberRole {
-  Admin = "admin",
+  Sponsor = "sponsor",
   Member = "member",
 }
 
@@ -249,6 +258,19 @@ export const refunds = sqliteTable(
       .$defaultFn(() => new Date().toISOString()),
     resolvedAt: text("resolved_at"),
     resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+    // The deciding Admin's reason, shown to the learner. Set only on decline,
+    // and kept apart from the learner's own `reason`.
+    declineReason: text("decline_reason"),
+    // The Refund (the money) for an Approved Refund Request. Null until
+    // approval, then Pending; an Admin moves it to Issued or Failed by hand.
+    refundState: text("refund_state").$type<RefundMoneyState>(),
+    refundStateChangedAt: text("refund_state_changed_at"),
+    // A Discretionary Refund Request, raised by an Admin on the learner's
+    // behalf. It skipped Refund Eligibility, so a different Admin must decide.
+    discretionary: integer("discretionary", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    raisedByUserId: integer("raised_by_user_id").references(() => users.id),
   },
   (table) => [index("refunds_purchase_idx").on(table.purchaseId)]
 );
@@ -274,7 +296,9 @@ export const teamMembers = sqliteTable("team_members", {
     .$defaultFn(() => new Date().toISOString()),
 });
 
-export const coupons = sqliteTable("coupons", {
+// A Team Purchase hands out one Seat per place bought. Each has a code that
+// anyone can use to claim it and enroll.
+export const seats = sqliteTable("seats", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   teamId: integer("team_id")
     .notNull()
@@ -286,8 +310,10 @@ export const coupons = sqliteTable("coupons", {
   purchaseId: integer("purchase_id")
     .notNull()
     .references(() => purchases.id),
-  redeemedByUserId: integer("redeemed_by_user_id").references(() => users.id),
-  redeemedAt: text("redeemed_at"),
+  claimedByUserId: integer("claimed_by_user_id").references(() => users.id),
+  claimedAt: text("claimed_at"),
+  // Set when the Team Purchase is refunded. A voided Seat can't be claimed.
+  voidedAt: text("voided_at"),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),

@@ -1,5 +1,7 @@
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
+import type { RunResult } from "better-sqlite3";
 import * as schema from "./schema";
 
 // The connection is opened lazily, on first use. Opening it at module scope
@@ -38,6 +40,14 @@ function openDatabase(filename: string) {
     throw error;
   }
 }
+
+/**
+ * A database the app's services can act on: the app's own `db`, or an
+ * in-memory one from `createTestDb` in tests. Services that take a database
+ * as their first argument type it as `Db`. A transaction
+ * (`db.transaction((tx) => …)`) is a `Db` too, so services compose inside one.
+ */
+export type Db = BaseSQLiteDatabase<"sync", RunResult, typeof schema>;
 
 let instance: ReturnType<typeof drizzle<typeof schema>> | undefined;
 

@@ -1,6 +1,6 @@
 import { data } from "react-router";
-import { eq, and } from "drizzle-orm";
-import { db } from "~/db";
+import { eq, and, desc } from "drizzle-orm";
+import type { Db } from "~/db";
 import {
   UserRole,
   users,
@@ -12,15 +12,15 @@ import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
 import { checkPppAccess } from "~/lib/ppp";
 
-function getUserById(id: number) {
+function getUserById(db: Db, id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
 }
 
-function getCourseById(id: number) {
+function getCourseById(db: Db, id: number) {
   return db.select().from(courses).where(eq(courses.id, id)).get();
 }
 
-function findEnrollment(userId: number, courseId: number) {
+function findEnrollment(db: Db, userId: number, courseId: number) {
   return db
     .select()
     .from(enrollments)
@@ -30,15 +30,16 @@ function findEnrollment(userId: number, courseId: number) {
     .get();
 }
 
-function isUserEnrolled(userId: number, courseId: number) {
-  return !!findEnrollment(userId, courseId);
+function isUserEnrolled(db: Db, userId: number, courseId: number) {
+  return !!findEnrollment(db, userId, courseId);
 }
 
-function findPurchase(userId: number, courseId: number) {
+function findPurchase(db: Db, userId: number, courseId: number) {
   return db
     .select()
     .from(purchases)
     .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
+    .orderBy(desc(purchases.createdAt), desc(purchases.id))
     .get();
 }
 
@@ -49,7 +50,8 @@ function findPurchase(userId: number, courseId: number) {
 // signed-out and unenrolled visitors rather than erroring. The require* wrappers
 // are built on it for the routes that should just reject.
 //
-// Uses positional parameters (project convention).
+// Takes the database as its first argument, so tests can pass an in-memory
+// one; routes pass the app's `db`. Uses positional parameters (project convention).
 
 export type Access = {
   userId: number | null;
@@ -84,20 +86,21 @@ const SIGNED_OUT: Access = {
 };
 
 export async function getAccess(
+  db: Db,
   request: Request,
   courseId: number
 ): Promise<Access> {
   const userId = await getCurrentUserId(request);
   if (!userId) return SIGNED_OUT;
 
-  const user = getUserById(userId);
+  const user = getUserById(db, userId);
   if (!user) return SIGNED_OUT;
 
-  const course = getCourseById(courseId);
+  const course = getCourseById(db, courseId);
   const isAdmin = user.role === UserRole.Admin;
   const isOwningInstructor = course?.instructorId === userId;
   const isStaff = isAdmin || isOwningInstructor;
-  const enrolled = isUserEnrolled(userId, courseId);
+  const enrolled = isUserEnrolled(db, userId, courseId);
 
   // PPP only restricts students who bought at a discount — staff are exempt.
   let ppp = {
@@ -107,7 +110,7 @@ export async function getAccess(
   };
 
   if (enrolled && !isStaff && course) {
-    const purchase = findPurchase(userId, courseId);
+    const purchase = findPurchase(db, userId, courseId);
     const currentCountry = await resolveCountry(request);
     ppp = checkPppAccess(
       course.price,
@@ -147,10 +150,11 @@ export async function requireUserId(request: Request): Promise<number> {
  * Use in actions — loader guards don't protect actions.
  */
 export async function requireContentAccess(
+  db: Db,
   request: Request,
   courseId: number
 ): Promise<Access> {
-  const access = await getAccess(request, courseId);
+  const access = await getAccess(db, request, courseId);
 
   if (!access.userId) {
     throw data("Select a user from the DevUI panel.", { status: 401 });
@@ -167,10 +171,11 @@ export async function requireContentAccess(
  * Throws unless the user is the course's own instructor, or an admin.
  */
 export async function requireStaff(
+  db: Db,
   request: Request,
   courseId: number
 ): Promise<Access> {
-  const access = await getAccess(request, courseId);
+  const access = await getAccess(db, request, courseId);
 
   if (!access.userId) {
     throw data("Select a user from the DevUI panel.", { status: 401 });
@@ -187,9 +192,9 @@ export async function requireStaff(
  * Throws unless the user is an instructor or an admin, without tying them to a
  * particular course — for pages that span all of someone's courses.
  */
-export async function requireInstructorOrAdmin(request: Request) {
+export async function requireInstructorOrAdmin(db: Db, request: Request) {
   const userId = await requireUserId(request);
-  const user = getUserById(userId);
+  const user = getUserById(db, userId);
 
   if (
     !user ||
@@ -199,4 +204,19 @@ export async function requireInstructorOrAdmin(request: Request) {
   }
 
   return { userId, user, isAdmin: user.role === UserRole.Admin };
+}
+
+/**
+ * Throws 401 when signed out, 403 unless the user is an Admin. Returns the
+ * Admin. Every admin page calls it from both its loader and its action.
+ */
+export async function requireAdmin(db: Db, request: Request) {
+  const userId = await requireUserId(request);
+  const user = getUserById(db, userId);
+
+  if (!user || user.role !== UserRole.Admin) {
+    throw data("Only admins can access this page.", { status: 403 });
+  }
+
+  return user;
 }
