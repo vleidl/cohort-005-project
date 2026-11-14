@@ -1,6 +1,6 @@
 # Cadence
 
-Cadence sells video courses to learners. This glossary covers the language around getting money back after a purchase.
+Cadence sells video courses to learners. This glossary covers the language around getting money back after a purchase, and around buying seats for a team.
 
 ## Language
 
@@ -11,7 +11,7 @@ A learner's ask, with their reason, to get back what they paid for a purchase. A
 _Avoid_: Refund (for the ask itself), Cancellation, Reversal, Chargeback
 
 **Admin**:
-A Cadence staff member who runs the platform, including deciding Refund Requests. Not the same as a Team admin, who manages a company's seats.
+A Cadence staff member who runs the platform, including deciding Refund Requests. Not the same as a Team Sponsor, who pays for a Team's Seats.
 _Avoid_: the team, staff, support
 
 **Refund Eligibility**:
@@ -46,3 +46,21 @@ _Avoid_: Completed, Paid out
 
 **Failed Refund**:
 A Refund where the money couldn't be sent. The Refund Request stays approved, because the decision hasn't changed, and sending can be tried again until the Refund is Issued.
+
+### Teams
+
+**Team Purchase**:
+A purchase of several Seats in one course, made by a Team Sponsor for their Team.
+_Avoid_: Bulk purchase, Group purchase
+
+**Seat**:
+One place in a course from a Team Purchase. Anyone can claim it to enroll in the course, and once claimed it belongs to whoever claimed it.
+_Avoid_: License, Slot
+
+**Team**:
+The Seats one Team Sponsor has paid for, across all of their Team Purchases.
+_Avoid_: Company, Organization
+
+**Team Sponsor**:
+The person who buys Seats for a Team and hands them out. Paying for Seats doesn't give them one, so they claim a Seat like anyone else to take the course. They stay the Team Sponsor even if every Seat they bought is refunded.
+_Avoid_: Team admin, Team owner, Team manager, Team buyer
