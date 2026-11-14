@@ -85,6 +85,13 @@
       "when": 1794609254021,
       "tag": "0011_numerous_ezekiel",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1794620869271,
+      "tag": "0012_coupons_become_seats",
+      "breakpoints": true
     }
   ]
 }

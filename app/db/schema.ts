@@ -47,7 +47,7 @@ export enum RefundMoneyState {
 }
 
 export enum TeamMemberRole {
-  Admin = "admin",
+  Sponsor = "sponsor",
   Member = "member",
 }
 
@@ -296,7 +296,9 @@ export const teamMembers = sqliteTable("team_members", {
     .$defaultFn(() => new Date().toISOString()),
 });
 
-export const coupons = sqliteTable("coupons", {
+// A Team Purchase hands out one Seat per place bought. Each has a code that
+// anyone can use to claim it and enroll.
+export const seats = sqliteTable("seats", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   teamId: integer("team_id")
     .notNull()
@@ -308,9 +310,9 @@ export const coupons = sqliteTable("coupons", {
   purchaseId: integer("purchase_id")
     .notNull()
     .references(() => purchases.id),
-  redeemedByUserId: integer("redeemed_by_user_id").references(() => users.id),
-  redeemedAt: text("redeemed_at"),
-  // Set when the team Purchase is refunded. A voided Coupon can't be redeemed.
+  claimedByUserId: integer("claimed_by_user_id").references(() => users.id),
+  claimedAt: text("claimed_at"),
+  // Set when the Team Purchase is refunded. A voided Seat can't be claimed.
   voidedAt: text("voided_at"),
   createdAt: text("created_at")
     .notNull()

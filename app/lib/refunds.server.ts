@@ -13,7 +13,7 @@ import {
 import type { Db } from "~/db";
 import {
   courses,
-  coupons,
+  seats,
   enrollments,
   lessonProgress,
   lessons,
@@ -438,22 +438,22 @@ function decideIfOpen(
  */
 function applyApproval(tx: Db, purchase: Purchase, now: Date) {
   endEnrollment(tx, purchase);
-  voidUnclaimedCoupons(tx, purchase, now);
+  voidUnclaimedSeats(tx, purchase, now);
 }
 
 /**
  * Seats that were paid back can't still let someone in. Claimed seats are
  * never voided: Refund Eligibility refuses a team Purchase once any seat is
- * claimed, so by approval every Coupon on it is unclaimed.
+ * claimed, so by approval every Seat on it is unclaimed.
  */
-function voidUnclaimedCoupons(tx: Db, purchase: Purchase, now: Date) {
-  tx.update(coupons)
+function voidUnclaimedSeats(tx: Db, purchase: Purchase, now: Date) {
+  tx.update(seats)
     .set({ voidedAt: now.toISOString() })
     .where(
       and(
-        eq(coupons.purchaseId, purchase.id),
-        isNull(coupons.redeemedAt),
-        isNull(coupons.voidedAt)
+        eq(seats.purchaseId, purchase.id),
+        isNull(seats.claimedAt),
+        isNull(seats.voidedAt)
       )
     )
     .run();
@@ -893,18 +893,18 @@ function isEnrolled(db: Db, learnerId: number, courseId: number) {
 
 function isTeamPurchase(db: Db, purchaseId: number) {
   return !!db
-    .select({ id: coupons.id })
-    .from(coupons)
-    .where(eq(coupons.purchaseId, purchaseId))
+    .select({ id: seats.id })
+    .from(seats)
+    .where(eq(seats.purchaseId, purchaseId))
     .get();
 }
 
 function hasClaimedSeat(db: Db, purchaseId: number) {
   return !!db
-    .select({ id: coupons.id })
-    .from(coupons)
+    .select({ id: seats.id })
+    .from(seats)
     .where(
-      and(eq(coupons.purchaseId, purchaseId), isNotNull(coupons.redeemedAt))
+      and(eq(seats.purchaseId, purchaseId), isNotNull(seats.claimedAt))
     )
     .get();
 }

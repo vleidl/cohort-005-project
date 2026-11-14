@@ -14,7 +14,7 @@ import type { Db } from "~/db";
 import {
   RefundMoneyState,
   RefundStatus,
-  coupons,
+  seats,
   courses,
   enrollments,
   purchases,
@@ -161,7 +161,7 @@ export type TopBuyer = {
   spendCents: number;
   purchaseCount: number;
   seatsBought: number;
-  seatsUnredeemed: number;
+  seatsUnclaimed: number;
   enrolled: boolean;
 };
 
@@ -244,8 +244,8 @@ export function getStudentRevenue(
   // Correlated: did this purchase mint seats for other people?
   const mintedSeats = db
     .select({ one: sql`1` })
-    .from(coupons)
-    .where(eq(coupons.purchaseId, purchases.id));
+    .from(seats)
+    .where(eq(seats.purchaseId, purchases.id));
 
   const direct = db
     .select({
@@ -265,26 +265,26 @@ export function getStudentRevenue(
     .all();
 
   const seatCounts = db
-    .select({ purchaseId: coupons.purchaseId, seats: count().as("seats") })
-    .from(coupons)
-    .groupBy(coupons.purchaseId)
+    .select({ purchaseId: seats.purchaseId, seats: count().as("seats") })
+    .from(seats)
+    .groupBy(seats.purchaseId)
     .as("seat_counts");
 
   const viaSeat = db
     .select({
-      userId: coupons.redeemedByUserId,
+      userId: seats.claimedByUserId,
       // Divided rather than rounded per row: the shares are summed first and
       // rounded once, so five seats out of 3333 cents still add up.
       paid: sql<number>`sum(${revenueAfterIssuedRefunds()} * 1.0 / ${seatCounts.seats})`,
     })
-    .from(coupons)
-    .innerJoin(purchases, eq(coupons.purchaseId, purchases.id))
+    .from(seats)
+    .innerJoin(purchases, eq(seats.purchaseId, purchases.id))
     .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .innerJoin(seatCounts, eq(seatCounts.purchaseId, coupons.purchaseId))
+    .innerJoin(seatCounts, eq(seatCounts.purchaseId, seats.purchaseId))
     .where(
-      and(inArray(coupons.redeemedByUserId, studentIds), ownedBy(instructorId))
+      and(inArray(seats.claimedByUserId, studentIds), ownedBy(instructorId))
     )
-    .groupBy(coupons.redeemedByUserId)
+    .groupBy(seats.claimedByUserId)
     .all();
 
   const paidByUser = new Map<number, number>();
@@ -331,17 +331,17 @@ export function getTopBuyers(
 
   const buyerIds = buyers.map((buyer) => buyer.userId);
 
-  // Seats are counted in their own query: joining coupons to purchases above
+  // Seats are counted in their own query: joining seats to purchases above
   // would repeat each purchase once per seat and multiply the spend the
   // leaderboard ranks on.
-  const seats = db
+  const seatTotals = db
     .select({
       userId: purchases.userId,
-      bought: count(coupons.id),
-      unredeemed: sql<number>`sum(case when ${coupons.redeemedByUserId} is null then 1 else 0 end)`,
+      bought: count(seats.id),
+      unclaimed: sql<number>`sum(case when ${seats.claimedByUserId} is null then 1 else 0 end)`,
     })
-    .from(coupons)
-    .innerJoin(purchases, eq(coupons.purchaseId, purchases.id))
+    .from(seats)
+    .innerJoin(purchases, eq(seats.purchaseId, purchases.id))
     .innerJoin(courses, eq(purchases.courseId, courses.id))
     .where(
       and(
@@ -352,7 +352,7 @@ export function getTopBuyers(
     .groupBy(purchases.userId)
     .all();
 
-  const seatsByUser = new Map(seats.map((row) => [row.userId, row]));
+  const seatsByUser = new Map(seatTotals.map((row) => [row.userId, row]));
 
   // No range here: "never enrolled" is a fact about the person, not about the
   // last thirty days.
@@ -373,7 +373,7 @@ export function getTopBuyers(
     spendCents: Number(buyer.spend ?? 0),
     purchaseCount: buyer.purchaseCount,
     seatsBought: seatsByUser.get(buyer.userId)?.bought ?? 0,
-    seatsUnredeemed: Number(seatsByUser.get(buyer.userId)?.unredeemed ?? 0),
+    seatsUnclaimed: Number(seatsByUser.get(buyer.userId)?.unclaimed ?? 0),
     enrolled: enrolled.has(buyer.userId),
   }));
 }

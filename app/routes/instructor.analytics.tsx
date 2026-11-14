@@ -614,7 +614,7 @@ export async function loader({ request, url }: Route.LoaderArgs) {
 
   // How many people paid, and how many are learning. Deliberately two numbers:
   // one team purchase is a single buyer covering several seats, and someone who
-  // redeems a seat enrols without a purchase row of their own.
+  // claims a seat enrols without a purchase row of their own.
   const buyerCountRow = db
     .select({ buyerCount: countDistinct(purchases.userId) })
     .from(purchases)
@@ -818,11 +818,11 @@ function TopBuyers({
                   </span>{" "}
                   <span className="text-xs text-muted-foreground">
                     bought {buyer.seatsBought},{" "}
-                    {buyer.seatsUnredeemed > 0 ? (
+                    {buyer.seatsUnclaimed > 0 ? (
                       // The prompt to chase: seats paid for that nobody is
                       // using are the most actionable thing on this table.
                       <span className="font-medium text-foreground">
-                        {buyer.seatsUnredeemed} unused
+                        {buyer.seatsUnclaimed} unused
                       </span>
                     ) : (
                       "all claimed"

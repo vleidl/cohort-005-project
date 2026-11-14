@@ -30,7 +30,7 @@ import {
   markRefundIssued,
 } from "./refund-money.server";
 import { getAccess, requireAdmin } from "./access.server";
-import { redeemCoupon } from "./coupons.server";
+import { claimSeat } from "./seats.server";
 
 let db: ReturnType<typeof createTestDb>;
 let base: ReturnType<typeof seedBaseData>;
@@ -99,11 +99,11 @@ function raise(
   return outcome.refundRequest;
 }
 
-function teamPurchaseWithCoupon(buyerId: number) {
+function teamPurchaseWithSeat(buyerId: number) {
   const purchase = buyCourse(db, buyerId, base.course.id);
   const team = db.insert(schema.teams).values({}).returning().get();
-  const coupon = db
-    .insert(schema.coupons)
+  const seat = db
+    .insert(schema.seats)
     .values({
       teamId: team.id,
       courseId: base.course.id,
@@ -112,7 +112,7 @@ function teamPurchaseWithCoupon(buyerId: number) {
     })
     .returning()
     .get();
-  return { purchase, coupon };
+  return { purchase, seat };
 }
 
 /**
@@ -285,21 +285,21 @@ describe("Refund Eligibility", () => {
   });
 
   it("blocks a team Purchase once one of its seats has been claimed", () => {
-    const { purchase, coupon } = teamPurchaseWithCoupon(base.user.id);
+    const { purchase, seat } = teamPurchaseWithSeat(base.user.id);
     const teamMember = addUser(db, "Team Member");
-    db.update(schema.coupons)
+    db.update(schema.seats)
       .set({
-        redeemedByUserId: teamMember.id,
-        redeemedAt: new Date().toISOString(),
+        claimedByUserId: teamMember.id,
+        claimedAt: new Date().toISOString(),
       })
-      .where(eq(schema.coupons.id, coupon.id))
+      .where(eq(schema.seats.id, seat.id))
       .run();
 
     expectBlockedBy(base.user, purchase, "claimed_team_seat");
   });
 
   it("allows a team Purchase whose seats are all unclaimed", () => {
-    const { purchase } = teamPurchaseWithCoupon(base.user.id);
+    const { purchase } = teamPurchaseWithSeat(base.user.id);
 
     expect(checkRefundEligibility(db, base.user, purchase).eligible).toBe(true);
   });
@@ -385,7 +385,7 @@ describe("the course page's refund offer", () => {
       })
       .returning()
       .get();
-    db.insert(schema.coupons)
+    db.insert(schema.seats)
       .values({
         teamId: db.insert(schema.teams).values({}).returning().get().id,
         courseId: base.course.id,
@@ -802,14 +802,14 @@ describe("Discretionary Refund Requests", () => {
   // A claimed seat belongs to the team member who claimed it, and one
   // purchase never has two undecided requests — discretion doesn't change that.
   it("never overrides a claimed team seat", () => {
-    const { purchase, coupon } = teamPurchaseWithCoupon(base.user.id);
+    const { purchase, seat } = teamPurchaseWithSeat(base.user.id);
     const member = addUser(db, "Team Member");
-    db.update(schema.coupons)
+    db.update(schema.seats)
       .set({
-        redeemedByUserId: member.id,
-        redeemedAt: new Date().toISOString(),
+        claimedByUserId: member.id,
+        claimedAt: new Date().toISOString(),
       })
-      .where(eq(schema.coupons.id, coupon.id))
+      .where(eq(schema.seats.id, seat.id))
       .run();
 
     expect(
@@ -1156,7 +1156,7 @@ describe("refunding a team Purchase", () => {
     const team = db.insert(schema.teams).values({}).returning().get();
     const codes = Array.from({ length: seats }, (_, i) => {
       const code = `SEAT-${purchase.id}-${i}`;
-      db.insert(schema.coupons)
+      db.insert(schema.seats)
         .values({
           teamId: team.id,
           courseId: base.course.id,
@@ -1170,7 +1170,7 @@ describe("refunding a team Purchase", () => {
   }
 
   // Seats that were paid back must not still let someone in.
-  it("voids every unclaimed Coupon on approval, so none of its seats can be redeemed", async () => {
+  it("voids every unclaimed Seat on approval, so none of them can be claimed", async () => {
     const buyer = addUser(db, "Team Buyer");
     const { purchase, codes } = buyTeamSeats(buyer.id, 3);
 
@@ -1180,9 +1180,9 @@ describe("refunding a team Purchase", () => {
 
     for (const code of codes) {
       const teamMember = addUser(db, "Team Member");
-      expect(redeemCoupon(db, code, teamMember.id, "")).toEqual({
+      expect(claimSeat(db, code, teamMember.id, "")).toEqual({
         ok: false,
-        error: "This coupon was cancelled because its purchase was refunded.",
+        error: "This seat was cancelled because its purchase was refunded.",
       });
       const access = await getAccess(
         db,

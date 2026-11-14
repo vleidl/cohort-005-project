@@ -27,14 +27,14 @@ function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
 }
 
-function getTeamForAdmin(userId: number) {
+function getTeamForSponsor(userId: number) {
   const membership = db
     .select()
     .from(teamMembers)
     .where(
       and(
         eq(teamMembers.userId, userId),
-        eq(teamMembers.role, TeamMemberRole.Admin)
+        eq(teamMembers.role, TeamMemberRole.Sponsor)
       )
     )
     .get();
@@ -44,8 +44,8 @@ function getTeamForAdmin(userId: number) {
   return db.select().from(teams).where(eq(teams.id, membership.teamId)).get();
 }
 
-function isTeamAdmin(userId: number) {
-  return !!getTeamForAdmin(userId);
+function isTeamSponsor(userId: number) {
+  return !!getTeamForSponsor(userId);
 }
 
 function getCourseLessonIds(courseId: number): number[] {
@@ -212,7 +212,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     devCountry,
     countryTierInfo,
     countries: COUNTRIES,
-    isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
+    isTeamSponsor: currentUserId ? isTeamSponsor(currentUserId) : false,
   };
 }
 
@@ -224,7 +224,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     devCountry,
     countryTierInfo,
     countries,
-    isTeamAdmin: userIsTeamAdmin,
+    isTeamSponsor: userIsTeamSponsor,
   } = loaderData;
 
   return (
@@ -232,7 +232,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
       <Sidebar
         currentUser={currentUser}
         recentCourses={recentCourses}
-        isTeamAdmin={userIsTeamAdmin}
+        isTeamSponsor={userIsTeamSponsor}
       />
       <main className="flex-1 overflow-y-auto">
         <Outlet />
