@@ -11,7 +11,7 @@ A learner's ask, with their reason, to get back what they paid for a purchase. A
 _Avoid_: Refund (for the ask itself), Cancellation, Reversal, Chargeback
 
 **Admin**:
-A Cadence staff member who runs the platform, including deciding Refund Requests. Not the same as a Team Sponsor, who pays for a Team's Seats.
+A Cadence staff member who runs the platform, including deciding Refund Requests. Not the same as a Team Sponsor, who pays for Seats.
 _Avoid_: the team, staff, support
 
 **Refund Eligibility**:
@@ -50,17 +50,13 @@ A Refund where the money couldn't be sent. The Refund Request stays approved, be
 ### Teams
 
 **Team Purchase**:
-A purchase of several Seats in one course, made by a Team Sponsor for their Team.
+A purchase of several Seats in one course, made by a Team Sponsor to hand out to others.
 _Avoid_: Bulk purchase, Group purchase
 
 **Seat**:
 One place in a course from a Team Purchase. Anyone can claim it to enroll in the course, and once claimed it belongs to whoever claimed it.
 _Avoid_: License, Slot
 
-**Team**:
-The Seats one Team Sponsor has paid for, across all of their Team Purchases.
-_Avoid_: Company, Organization
-
 **Team Sponsor**:
-The person who buys Seats for a Team and hands them out. Paying for Seats doesn't give them one, so they claim a Seat like anyone else to take the course. They stay the Team Sponsor even if every Seat they bought is refunded.
+The person who makes a Team Purchase and hands out its Seats. Paying for Seats doesn't give them one, so they claim a Seat like anyone else to take the course. They stay the Team Sponsor even if every Seat they bought is refunded.
 _Avoid_: Team admin, Team owner, Team manager, Team buyer
