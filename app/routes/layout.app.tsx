@@ -7,6 +7,7 @@ import { Toaster } from "sonner";
 import {
   NotificationsPrototypeProvider,
   NOTIFICATION_VARIANTS,
+  PrototypeVolumeToggle,
   RightRailSlot,
   useMainOverride,
   usePrototypeStateSummary,
@@ -282,7 +283,11 @@ function PrototypeBar() {
     <PrototypeSwitcher
       variants={NOTIFICATION_VARIANTS}
       current={searchParams.get("variant") ?? "A"}
-      extra={usePrototypeStateSummary()}
+      extra={
+        <>
+          {usePrototypeStateSummary()} <PrototypeVolumeToggle />
+        </>
+      }
     />
   );
 }

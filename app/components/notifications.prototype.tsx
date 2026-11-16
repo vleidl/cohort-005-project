@@ -274,7 +274,11 @@ const TEAM_ADMIN: ProtoNotification[] = [
   },
 ];
 
-function fixturesFor(role: UserRole | null, isTeamAdmin: boolean) {
+function fixturesFor(
+  role: UserRole | null,
+  isTeamAdmin: boolean,
+  many: boolean
+) {
   const base =
     role === UserRole.Instructor
       ? INSTRUCTOR
@@ -284,7 +288,18 @@ function fixturesFor(role: UserRole | null, isTeamAdmin: boolean) {
           ? STUDENT
           : [];
   const all = isTeamAdmin ? [...TEAM_ADMIN, ...base] : base;
-  return [...all].sort((x, y) => x.minutesAgo - y.minutesAgo);
+  // ?many=1 — pad with ~45 older copies spread over ~4 weeks; the newest 18
+  // of them unread, so the list is long and the unread count is in the 20s.
+  const extra =
+    many && all.length > 0
+      ? Array.from({ length: 45 }, (_, i) => ({
+          ...all[i % all.length],
+          id: `${all[i % all.length].id}-x${i}`,
+          minutesAgo: 60 * 4 + i * 60 * 14,
+          initiallyRead: i >= 18,
+        }))
+      : [];
+  return [...all, ...extra].sort((x, y) => x.minutesAgo - y.minutesAgo);
 }
 
 function ago(m: number) {
@@ -329,9 +344,10 @@ export function NotificationsPrototypeProvider({
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const variant = searchParams.get("variant") ?? "A";
+  const many = searchParams.get("many") === "1";
   const items = useMemo(
-    () => fixturesFor(role, isTeamAdmin),
-    [role, isTeamAdmin]
+    () => fixturesFor(role, isTeamAdmin, many),
+    [role, isTeamAdmin, many]
   );
   const initialRead = () =>
     new Set(items.filter((n) => n.initiallyRead).map((n) => n.id));
@@ -367,6 +383,24 @@ export function NotificationsPrototypeProvider({
     },
   };
   return <Ctx.Provider value={state}>{children}</Ctx.Provider>;
+}
+
+export function PrototypeVolumeToggle() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const many = searchParams.get("many") === "1";
+  return (
+    <button
+      onClick={() => {
+        const p = new URLSearchParams(searchParams);
+        if (many) p.delete("many");
+        else p.set("many", "1");
+        setSearchParams(p, { replace: true, preventScrollReset: true });
+      }}
+      className="rounded-full bg-white/20 px-2 py-0.5 hover:bg-white/30"
+    >
+      {many ? "Few" : "Dozens"}
+    </button>
+  );
 }
 
 export function usePrototypeStateSummary() {
@@ -491,8 +525,8 @@ function BellDropdown() {
               })}
             </ul>
             <div className="px-4 py-2 text-center text-xs text-muted-foreground">
-              Showing the latest {s.items.length}. No separate page in this
-              variant.
+              {s.items.length} Notifications, all in this one list. No separate
+              page in this variant.
             </div>
           </div>
         </>
