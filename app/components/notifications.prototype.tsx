@@ -7,6 +7,7 @@
 //       page clears it); rows stay unread until opened; "Needs action" / "All" tabs.
 //   C — Right-hand rail; Important Notifications are to-do cards that stay until
 //       done or dismissed; informational ones are a quiet feed, read once shown.
+//   D — A's bell, but the popup lists unread only; "See all" opens B's page.
 // Data is fixtures picked by role (+ Team Admin); read state lives in memory only.
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
@@ -330,6 +331,7 @@ export const NOTIFICATION_VARIANTS = [
   { key: "A", name: "Bell + dropdown" },
   { key: "B", name: "Notifications page" },
   { key: "C", name: "Action rail" },
+  { key: "D", name: "Bell (unread) + See all page" },
 ];
 
 export function NotificationsPrototypeProvider({
@@ -379,7 +381,7 @@ export function NotificationsPrototypeProvider({
     open: (n) => {
       markRead(n.id);
       // keep ?variant= across navigation so the prototype stays put
-      navigate(`${n.to}?variant=${variant}`);
+      navigate(`${n.to}?variant=${variant}${many ? "&many=1" : ""}`);
     },
   };
   return <Ctx.Provider value={state}>{children}</Ctx.Provider>;
@@ -449,14 +451,17 @@ function KindTag({ n }: { n: ProtoNotification }) {
 
 export function SidebarHeaderSlot() {
   const s = useProto();
-  if (s.variant !== "A") return null;
-  return <BellDropdown />;
+  if (s.variant === "A") return <BellDropdown />;
+  if (s.variant === "D") return <BellDropdown unreadOnly />;
+  return null;
 }
 
-function BellDropdown() {
+function BellDropdown({ unreadOnly = false }: { unreadOnly?: boolean }) {
   const s = useProto();
   const [open, setOpen] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
   const unread = s.items.filter((n) => !s.read.has(n.id)).length;
+  const shown = unreadOnly ? s.items.filter((n) => !s.read.has(n.id)) : s.items;
 
   return (
     <div className="relative ml-auto">
@@ -486,12 +491,12 @@ function BellDropdown() {
               </button>
             </div>
             <ul className="max-h-[28rem] overflow-y-auto">
-              {s.items.length === 0 && (
+              {shown.length === 0 && (
                 <li className="px-4 py-8 text-center text-sm text-muted-foreground">
-                  Nothing yet.
+                  {unreadOnly ? "You're all caught up." : "Nothing yet."}
                 </li>
               )}
-              {s.items.map((n) => {
+              {shown.map((n) => {
                 const isRead = s.read.has(n.id);
                 return (
                   <li key={n.id}>
@@ -524,10 +529,24 @@ function BellDropdown() {
                 );
               })}
             </ul>
-            <div className="px-4 py-2 text-center text-xs text-muted-foreground">
-              {s.items.length} Notifications, all in this one list. No separate
-              page in this variant.
-            </div>
+            {unreadOnly ? (
+              <button
+                onClick={() => {
+                  setOpen(false);
+                  const p = new URLSearchParams(searchParams);
+                  p.set("inbox", "1");
+                  setSearchParams(p);
+                }}
+                className="w-full px-4 py-2.5 text-center text-sm font-medium text-primary hover:bg-accent"
+              >
+                See all Notifications ({s.items.length})
+              </button>
+            ) : (
+              <div className="px-4 py-2 text-center text-xs text-muted-foreground">
+                {s.items.length} Notifications, all in this one list. No
+                separate page in this variant.
+              </div>
+            )}
           </div>
         </>
       )}
@@ -568,7 +587,10 @@ export function SidebarNavSlot() {
 export function useMainOverride(): React.ReactNode | null {
   const s = useProto();
   const [searchParams] = useSearchParams();
-  if (s.variant === "B" && searchParams.get("inbox") === "1")
+  if (
+    (s.variant === "B" || s.variant === "D") &&
+    searchParams.get("inbox") === "1"
+  )
     return <NotificationsPage />;
   return null;
 }
@@ -597,8 +619,9 @@ function NotificationsPage() {
         <div>
           <h1 className="text-2xl font-bold">Notifications</h1>
           <p className="text-sm text-muted-foreground">
-            Opening this page clears the sidebar badge. Each row stays unread
-            until you open it.
+            {s.variant === "D"
+              ? "The bell counts unread. Each row stays unread until you open it or tick it."
+              : "Opening this page clears the sidebar badge. Each row stays unread until you open it."}
           </p>
         </div>
         <button
