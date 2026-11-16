@@ -47,6 +47,8 @@ export default [
     route("settings", "routes/settings.tsx"),
     route("team", "routes/team.tsx"),
     route("redeem/:code", "routes/redeem.$code.tsx"),
+    // PROTOTYPE — throwaway (wayfinder "Per-Channel content")
+    route("prototype/notification-content", "routes/prototype.notification-content.tsx"),
   ]),
   route("signup", "routes/signup.tsx"),
   route("login", "routes/login.tsx"),
