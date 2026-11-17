@@ -15,6 +15,12 @@ import {
   raiseRefundRequest,
 } from "./refunds.server";
 import {
+  listBookmarks,
+  listNotes,
+  saveNote,
+  toggleBookmark,
+} from "./saved.server";
+import {
   fakeNotifications,
   type FakeNotifications,
 } from "./notifications.fake.server";
@@ -265,6 +271,21 @@ describe("the refund offer on the course page", () => {
 });
 
 describe("approving a Refund Request", () => {
+  it("keeps the buyer's Bookmarks and Notes", async () => {
+    const purchase = buyForSelf(base.user.id);
+    toggleBookmark(db, base.user.id, lessonIds[0], NOW);
+    saveNote(db, base.user.id, lessonIds[0], "Come back to this", NOW);
+    const id = await raise(purchase.id, base.user.id);
+
+    await approveRefundRequest(db, id, platformAdmin.id, null, NOW, notifications);
+
+    expect(isEnrolled(base.user.id)).toBe(false);
+    expect(listBookmarks(db, base.user.id)).toHaveLength(1);
+    expect(listNotes(db, base.user.id)).toMatchObject([
+      { body: "Come back to this" },
+    ]);
+  });
+
   it("removes the buyer's Enrollment but keeps their progress", async () => {
     const purchase = buyForSelf(base.user.id);
     db.insert(schema.lessonProgress)
