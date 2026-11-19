@@ -22,11 +22,19 @@ _Avoid_: Admin (on its own), the team, Staff
 A Student who buys and manages a Team Licence. A Team Admin has no say over Refund Requests.
 _Avoid_: Admin (on its own)
 
+**Viewer**:
+The person behind a request, known by who they are (if signed in) and the country they are in right now.
+_Avoid_: Current user, Visitor
+
 ### Enrollment
 
 **Enrollment**:
-A Student's place on a course, which lets them take it. A Student has at most one Enrollment per course, whether it came from an Individual Purchase or a Claimed Seat.
+A Student's place on a course, which lets them take it. A Student has at most one Enrollment per course, and it records the one Purchase that granted it: their own Individual Purchase, or the Team Licence behind their Claimed Seat.
 _Avoid_: Place on a course, Access
+
+**Course Access**:
+What a Viewer may do on a course: read its content, or act as its staff. Separate from Enrollment: staff have Course Access without one, and an enrolled Student outside their Purchase's country may not read the content.
+_Avoid_: Permissions, Entitlement
 
 **Lapsed**:
 A Student who has lost their Enrollment on a course but still has progress on it.
